@@ -131,9 +131,7 @@ def test_valid_coordinates_are_within_geographic_bounds(silver_df):
         ),
     ],
 )
-def test_gold_dataset_exists_and_has_required_columns(
-    spark, dataset_name, required_columns
-):
+def test_gold_dataset_exists_and_has_required_columns(spark, dataset_name, required_columns):
     dataset_path = GOLD_DIR / dataset_name
 
     assert dataset_path.exists(), (

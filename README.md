@@ -21,7 +21,7 @@ Windows filesystem, VS Code, WSL Ubuntu, and Docker Compose.
 
 - [x] Development environment verified
 - [x] Local Kafka infrastructure
-- [ ] Historical batch pipeline
+- [x] Historical batch pipeline
 - [ ] Streaming pipeline
 - [ ] Batch-stream integration
 - [ ] Airflow orchestration
