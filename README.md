@@ -20,7 +20,7 @@ Windows filesystem, VS Code, WSL Ubuntu, and Docker Compose.
 ## Project status
 
 - [x] Development environment verified
-- [ ] Local Kafka infrastructure
+- [x] Local Kafka infrastructure
 - [ ] Historical batch pipeline
 - [ ] Streaming pipeline
 - [ ] Batch-stream integration
