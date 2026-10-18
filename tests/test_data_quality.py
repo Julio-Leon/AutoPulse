@@ -5,6 +5,9 @@ import pytest
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
+from pathlib import Path
+from pyspark.sql import functions as F
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "collisions"
@@ -174,3 +177,115 @@ def test_gold_collision_counts_are_positive(spark, dataset_name):
     ).count()
 
     assert invalid_counts == 0
+
+
+
+# --------------------------------------------------
+# Vehicle telemetry data quality tests
+# --------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+VEHICLE_SILVER_DIR = (
+    PROJECT_ROOT / "data" / "silver" / "vehicle_telemetry"
+)
+
+VEHICLE_QUARANTINE_DIR = (
+    PROJECT_ROOT / "data" / "quarantine" / "vehicle_telemetry"
+)
+
+
+@pytest.fixture(scope="session")
+def vehicle_silver_df(spark):
+    assert VEHICLE_SILVER_DIR.exists(), (
+        f"Vehicle Silver directory not found: {VEHICLE_SILVER_DIR}"
+    )
+    return spark.read.parquet(str(VEHICLE_SILVER_DIR))
+
+
+def test_vehicle_silver_dataset_is_not_empty(vehicle_silver_df):
+    assert vehicle_silver_df.count() > 0
+
+
+def test_vehicle_event_ids_are_not_null(vehicle_silver_df):
+    assert vehicle_silver_df.filter(
+        F.col("event_id").isNull()
+        | (F.trim(F.col("event_id")) == "")
+    ).count() == 0
+
+
+def test_vehicle_event_ids_are_unique(vehicle_silver_df):
+    duplicates = (
+        vehicle_silver_df
+        .groupBy("event_id")
+        .count()
+        .filter(F.col("count") > 1)
+    )
+    assert duplicates.count() == 0
+
+
+def test_vehicle_ids_are_not_null(vehicle_silver_df):
+    assert vehicle_silver_df.filter(
+        F.col("vehicle_id").isNull()
+        | (F.trim(F.col("vehicle_id")) == "")
+    ).count() == 0
+
+
+def test_vehicle_coordinates_are_valid(vehicle_silver_df):
+    invalid_coordinates = vehicle_silver_df.filter(
+        F.col("latitude").isNull()
+        | F.col("longitude").isNull()
+        | (F.col("latitude") < -90)
+        | (F.col("latitude") > 90)
+        | (F.col("longitude") < -180)
+        | (F.col("longitude") > 180)
+    )
+    assert invalid_coordinates.count() == 0
+
+
+def test_vehicle_speed_is_nonnegative(vehicle_silver_df):
+    assert vehicle_silver_df.filter(
+        F.col("speed_mph").isNull()
+        | (F.col("speed_mph") < 0)
+    ).count() == 0
+
+
+def test_vehicle_odometer_is_nonnegative(vehicle_silver_df):
+    assert vehicle_silver_df.filter(
+        F.col("odometer_miles").isNull()
+        | (F.col("odometer_miles") < 0)
+    ).count() == 0
+
+
+def test_vehicle_fuel_level_is_between_zero_and_100(vehicle_silver_df):
+    assert vehicle_silver_df.filter(
+        F.col("fuel_level_pct").isNull()
+        | (F.col("fuel_level_pct") < 0)
+        | (F.col("fuel_level_pct") > 100)
+    ).count() == 0
+
+
+def test_vehicle_engine_status_is_valid(vehicle_silver_df):
+    allowed_statuses = ["running", "idling", "off"]
+
+    assert vehicle_silver_df.filter(
+        F.col("engine_status").isNull()
+        | (~F.col("engine_status").isin(*allowed_statuses))
+    ).count() == 0
+
+
+def test_quarantine_records_have_validation_reasons(spark):
+    if not VEHICLE_QUARANTINE_DIR.exists():
+        pytest.skip("No vehicle quarantine dataset was created")
+
+    quarantine_df = spark.read.parquet(str(VEHICLE_QUARANTINE_DIR))
+
+    if quarantine_df.count() == 0:
+        pytest.skip("Vehicle quarantine dataset is empty")
+
+    assert "validation_error" in quarantine_df.columns
+
+    assert quarantine_df.filter(
+        F.col("validation_error").isNull()
+        | (F.trim(F.col("validation_error")) == "")
+    ).count() == 0
