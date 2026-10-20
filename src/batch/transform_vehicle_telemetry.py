@@ -1,11 +1,13 @@
 
-import json
-import logging
 import sys
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+if __package__ in (None, ""):
+    # Allow `python src/batch/transform_vehicle_telemetry.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from pyspark.sql import functions as F
+from pyspark.sql.window import Window
 from pyspark.sql.types import (
     BooleanType,
     DoubleType,
@@ -14,38 +16,20 @@ from pyspark.sql.types import (
     StructField,
 )
 
+from src.common import config
+
 
 # --------------------------------------------------
 # Project paths
 # --------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BRONZE_DIR = config.BRONZE_VEHICLE_TELEMETRY
+SILVER_DIR = config.SILVER_VEHICLE_TELEMETRY
+QUARANTINE_DIR = config.QUARANTINE_VEHICLE_TELEMETRY
 
-BRONZE_DIR = PROJECT_ROOT / "data" / "bronze" / "vehicle_telemetry"
-SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "vehicle_telemetry"
-QUARANTINE_DIR = PROJECT_ROOT / "data" / "quarantine" / "vehicle_telemetry"
-
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG_FILE = LOG_DIR / "transform_vehicle_telemetry.log"
-
-
-# --------------------------------------------------
-# Logging
-# --------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
+logger = config.setup_logging(
+    "transform_vehicle_telemetry.log", "autopulse.vehicle_silver"
 )
-
-logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------
@@ -74,25 +58,19 @@ def main():
     spark = None
 
     try:
-        if not BRONZE_DIR.exists():
+        logger.info("Starting vehicle telemetry Bronze-to-Silver job | %s", config.describe())
+
+        spark = config.build_spark(
+            "AutoPulse-Transform-Vehicle-Telemetry", shuffle_partitions=4
+        )
+
+        if not config.path_exists(spark, BRONZE_DIR):
             raise FileNotFoundError(
                 f"Bronze directory not found: {BRONZE_DIR}"
             )
 
-        logger.info("Starting vehicle telemetry Bronze-to-Silver job")
-
-        spark = (
-            SparkSession.builder
-            .appName("AutoPulse-Transform-Vehicle-Telemetry")
-            .master("local[*]")
-            .config("spark.sql.shuffle.partitions", "4")
-            .getOrCreate()
-        )
-
-        spark.sparkContext.setLogLevel("WARN")
-
         # Read the raw Bronze records.
-        bronze_df = spark.read.parquet(str(BRONZE_DIR))
+        bronze_df = spark.read.parquet(BRONZE_DIR)
         bronze_count = bronze_df.count()
 
         logger.info("Bronze record count: %s", bronze_count)
@@ -114,6 +92,9 @@ def main():
                 "kafka_timestamp",
                 "ingested_at",
                 "raw_payload",
+                # Keep an explicit flag: "parsed" itself is not kept after
+                # "parsed.*" expands it, so later filters cannot refer to it.
+                F.col("parsed").isNull().alias("parse_failed"),
                 "parsed.*",
             )
             .withColumn(
@@ -197,18 +178,20 @@ def main():
 
         # Parse failures produce null fields. Catch them separately.
         invalid_df = validated_df.filter(
-            F.col("parsed").isNull()
+            F.col("parse_failed")
             | F.col("validation_error").isNotNull()
+        ).withColumn(
+            "validation_error",
+            F.coalesce(F.col("validation_error"), F.lit("unparseable_payload")),
         )
 
         valid_df = validated_df.filter(
-            F.col("parsed").isNotNull()
+            ~F.col("parse_failed")
             & F.col("validation_error").isNull()
         )
 
         # If duplicate event IDs exist, retain one record.
         # Kafka topic/partition/offset provide deterministic ordering.
-        from pyspark.sql.window import Window
 
         dedup_window = Window.partitionBy("event_id").orderBy(
             F.col("kafka_timestamp").asc(),
@@ -231,16 +214,16 @@ def main():
         clean_df = (
             ranked_df
             .filter(F.col("duplicate_rank") == 1)
-            .drop("duplicate_rank", "parsed", "timestamp", "raw_payload")
+            .drop("duplicate_rank", "parse_failed", "timestamp", "raw_payload")
         )
 
         # Store invalid records and duplicates in quarantine.
         quarantine_df = (
-            invalid_df.drop("parsed")
+            invalid_df.drop("parse_failed")
             .unionByName(
                 duplicate_df.drop(
                     "duplicate_rank",
-                    "parsed",
+                    "parse_failed",
                     "raw_payload",
                     "timestamp",
                 ),
@@ -259,13 +242,12 @@ def main():
         logger.info("Total quarantine records: %s", quarantine_count)
 
         # Write each output as Parquet.
-        clean_df.repartition(15).write.mode("overwrite").parquet(str(SILVER_DIR))
+        # 4 files is plenty for this volume; fewer files load faster in Snowflake.
+        clean_df.repartition(4).write.mode("overwrite").parquet(SILVER_DIR)
         logger.info("Silver output written to %s", SILVER_DIR)
 
         if quarantine_count > 0:
-            quarantine_df.write.mode("overwrite").parquet(
-                str(QUARANTINE_DIR)
-            )
+            quarantine_df.write.mode("overwrite").parquet(QUARANTINE_DIR)
             logger.info("Quarantine output written to %s", QUARANTINE_DIR)
         else:
             logger.info("No records require quarantine")

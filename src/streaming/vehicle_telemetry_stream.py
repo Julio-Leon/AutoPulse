@@ -1,45 +1,37 @@
+"""
+Kafka (vehicle.telemetry.raw) -> Bronze vehicle telemetry, via Spark
+Structured Streaming.
 
-import logging
+Each micro-batch is appended to Bronze as Parquet. The trigger interval is
+configurable (STREAM_TRIGGER_INTERVAL, default "1 minute"): a longer interval
+produces fewer, larger files, which is cheaper on S3 and better for Snowpipe
+than one tiny file every few seconds.
+"""
+
 import sys
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+if __package__ in (None, ""):
+    # Allow `python src/streaming/vehicle_telemetry_stream.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from pyspark.sql import functions as F
+
+from src.common import config
 
 
 # --------------------------------------------------
 # Project configuration
 # --------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+KAFKA_BOOTSTRAP_SERVERS = config.KAFKA_BOOTSTRAP_SERVERS
+KAFKA_TOPIC = config.VEHICLE_TELEMETRY_TOPIC
 
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+BRONZE_DIR = config.BRONZE_VEHICLE_TELEMETRY
+CHECKPOINT_DIR = config.checkpoint_path("vehicle_telemetry_bronze")
+TRIGGER_INTERVAL = config.STREAM_TRIGGER_INTERVAL
 
-LOG_FILE = LOG_DIR / "vehicle_telemetry_stream.log"
-
-KAFKA_BOOTSTRAP_SERVERS = "localhost:29092"
-KAFKA_TOPIC = "vehicle.telemetry.raw"
-
-BRONZE_DIR = PROJECT_ROOT / "data" / "bronze" / "vehicle_telemetry"
-CHECKPOINT_DIR = PROJECT_ROOT / "checkpoints" / "vehicle_telemetry_bronze"
-
-
-# --------------------------------------------------
-# Logging
-# --------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
-)
-
-logger = logging.getLogger(__name__)
+logger = config.setup_logging("vehicle_telemetry_stream.log", "autopulse.stream")
 
 
 # --------------------------------------------------
@@ -51,23 +43,18 @@ def main():
     query = None
 
     try:
-        BRONZE_DIR.mkdir(parents=True, exist_ok=True)
-        CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Starting AutoPulse Bronze telemetry ingestion")
+        logger.info("Starting AutoPulse Bronze telemetry ingestion | %s", config.describe())
         logger.info("Kafka topic: %s", KAFKA_TOPIC)
         logger.info("Bronze output: %s", BRONZE_DIR)
         logger.info("Checkpoint: %s", CHECKPOINT_DIR)
+        logger.info("Trigger interval: %s", TRIGGER_INTERVAL)
 
-        spark = (
-            SparkSession.builder
-            .appName("AutoPulse-Vehicle-Telemetry-Bronze")
-            .master("local[*]")
-            .config("spark.sql.shuffle.partitions", "4")
-            .getOrCreate()
+        # kafka=True adds the spark-sql-kafka connector matching your PySpark version.
+        spark = config.build_spark(
+            "AutoPulse-Vehicle-Telemetry-Bronze",
+            shuffle_partitions=4,
+            kafka=True,
         )
-
-        spark.sparkContext.setLogLevel("WARN")
 
         # Read the Kafka stream.
         kafka_stream = (
@@ -92,13 +79,14 @@ def main():
         )
 
         # Append each micro-batch to Bronze Parquet.
+        # coalesce(1): one file per micro-batch instead of one per Kafka partition.
         query = (
-            bronze_stream.writeStream
+            bronze_stream.coalesce(1).writeStream
             .format("parquet")
             .outputMode("append")
-            .option("path", str(BRONZE_DIR))
-            .option("checkpointLocation", str(CHECKPOINT_DIR))
-            .trigger(processingTime="5 seconds")
+            .option("path", BRONZE_DIR)
+            .option("checkpointLocation", CHECKPOINT_DIR)
+            .trigger(processingTime=TRIGGER_INTERVAL)
             .start()
         )
 

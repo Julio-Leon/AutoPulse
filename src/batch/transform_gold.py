@@ -1,46 +1,25 @@
 
-import logging
 import sys
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+if __package__ in (None, ""):
+    # Allow `python src/batch/transform_gold.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from pyspark.sql import functions as F
+
+from src.common import config
 
 
 # ---------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SILVER_DIR = config.SILVER_COLLISIONS
+GOLD_DIR = config.GOLD_ROOT
+LOG_FILE = config.LOG_DIR / "transform_gold.log"
 
-SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "collisions"
-GOLD_DIR = PROJECT_ROOT / "data" / "gold"
-
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG_FILE = LOG_DIR / "transform_gold.log"
-
-
-# ---------------------------------------------------------
-# Logging configuration
-# ---------------------------------------------------------
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[
-        logging.FileHandler(
-            LOG_FILE,
-            mode="w",
-            encoding="utf-8",
-        ),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
-)
-
-logger = logging.getLogger("autopulse.gold")
+logger = config.setup_logging(LOG_FILE.name, "autopulse.gold")
 
 
 # ---------------------------------------------------------
@@ -51,24 +30,18 @@ def main():
     spark = None
 
     try:
-        logger.info("Starting Silver-to-Gold pipeline.")
+        logger.info("Starting Silver-to-Gold pipeline. %s", config.describe())
         logger.info("Silver input: %s", SILVER_DIR)
         logger.info("Gold output: %s", GOLD_DIR)
         logger.info("Log file: %s", LOG_FILE)
 
-        if not SILVER_DIR.exists():
+        # Create Spark session.
+        spark = config.build_spark("AutoPulse-Silver-to-Gold", shuffle_partitions=12)
+
+        if not config.path_exists(spark, SILVER_DIR):
             raise FileNotFoundError(
                 f"Silver directory does not exist: {SILVER_DIR}"
             )
-
-        # Create Spark session.
-        spark = (
-            SparkSession.builder
-            .appName("AutoPulse-Silver-to-Gold")
-            .master("local[*]")
-            .config("spark.sql.shuffle.partitions", "12")
-            .getOrCreate()
-        )
 
         logger.info("Spark session created successfully.")
 
@@ -78,7 +51,7 @@ def main():
 
         logger.info("Reading Silver Parquet data.")
 
-        df = spark.read.parquet(str(SILVER_DIR))
+        df = spark.read.parquet(SILVER_DIR)
 
         silver_count = df.count()
 
@@ -150,10 +123,10 @@ def main():
             .orderBy("crash_hour")
         )
 
-        hourly_path = GOLD_DIR / "hourly_collisions"
+        hourly_path = f"{GOLD_DIR}/hourly_collisions"
 
         hourly.write.mode("overwrite").parquet(
-            str(hourly_path)
+            hourly_path
         )
 
         hourly_count = hourly.count()
@@ -171,9 +144,11 @@ def main():
         logger.info("Building borough summary.")
 
         borough = (
+            # Silver marks missing boroughs as "UNKNOWN"; exclude them here.
             df.filter(
                 F.col("borough").isNotNull()
                 & (F.col("borough") != "")
+                & (F.col("borough") != "UNKNOWN")
             )
             .groupBy("borough")
             .agg(
@@ -190,10 +165,10 @@ def main():
             .orderBy(F.desc("collision_count"))
         )
 
-        borough_path = GOLD_DIR / "borough_summary"
+        borough_path = f"{GOLD_DIR}/borough_summary"
 
         borough.write.mode("overwrite").parquet(
-            str(borough_path)
+            borough_path
         )
 
         borough_count = borough.count()
@@ -240,10 +215,10 @@ def main():
             .orderBy(F.desc("collision_count"))
         )
 
-        hotspots_path = GOLD_DIR / "geographic_hotspots"
+        hotspots_path = f"{GOLD_DIR}/geographic_hotspots"
 
         hotspots.write.mode("overwrite").parquet(
-            str(hotspots_path)
+            hotspots_path
         )
 
         hotspots_count = hotspots.count()

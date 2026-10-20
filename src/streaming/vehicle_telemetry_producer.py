@@ -1,6 +1,5 @@
 
 import json
-import logging
 import os
 import random
 import sys
@@ -8,31 +7,30 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__ in (None, ""):
+    # Allow `python src/streaming/vehicle_telemetry_producer.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
+
+from src.common import config
 
 
 # --------------------------------------------------
 # Configuration
 # --------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
-LOG_FILE = LOG_DIR / "vehicle_telemetry_producer.log"
-
-# Runtime state persists between simulator restarts.
-STATE_DIR = PROJECT_ROOT / "data" / "raw"
+# Runtime state persists between simulator restarts (always on local disk).
+STATE_DIR = config.SIMULATOR_STATE_DIR
 STATE_FILE = STATE_DIR / "fleet_state.json"
 TEMP_STATE_FILE = STATE_DIR / "fleet_state.tmp"
 
-BOOTSTRAP_SERVERS = "localhost:29092"
-TOPIC = "vehicle.telemetry.raw"
+BOOTSTRAP_SERVERS = config.KAFKA_BOOTSTRAP_SERVERS
+TOPIC = config.VEHICLE_TELEMETRY_TOPIC
 
-NUMBER_OF_VEHICLES = 10
-PUBLISH_INTERVAL_SECONDS = 5
+NUMBER_OF_VEHICLES = config.SIMULATOR_NUMBER_OF_VEHICLES
+PUBLISH_INTERVAL_SECONDS = config.SIMULATOR_PUBLISH_INTERVAL_SECONDS
 
 BASE_LATITUDE = 40.7580
 BASE_LONGITUDE = -73.9855
@@ -46,17 +44,9 @@ AVERAGE_MPG = 25.0
 # Logging
 # --------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
+logger = config.setup_logging(
+    "vehicle_telemetry_producer.log", "autopulse.vehicle_producer"
 )
-
-logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------

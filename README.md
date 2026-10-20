@@ -13,9 +13,9 @@ The project follows a layered data processing approach, organizing data into **B
 - **Apache Spark / PySpark** — Distributed data processing, batch transformations, and Structured Streaming.
 - **Apache Airflow** — Workflow orchestration, scheduling, and pipeline dependency management.
 - **Apache Parquet** — Columnar storage format for efficient analytical processing.
-- **PostgreSQL** — Relational storage for metadata, pipeline tracking, and supporting application data.
-- **AWS S3** — Cloud object storage for data lake layers and processed datasets.
-- **AWS services** — Cloud infrastructure and deployment components to be incorporated as the project evolves.
+- **AWS S3** — Data lake for the Bronze, Silver, and Gold layers.
+- **AWS EC2** — Single cloud host running Kafka, the simulator, Spark jobs, and Airflow via Docker Compose.
+- **Snowflake** — Analytics warehouse: Snowpipe auto-ingestion from S3 and a star schema (facts and dimensions) built in SQL.
 - **Docker & Docker Compose** — Containerized services and reproducible local development environments.
 - **Git & GitHub** — Version control, source code management, and collaboration.
 - **VS Code & WSL 2 (Ubuntu)** — Linux-based development environment on Windows.
@@ -28,8 +28,57 @@ The project follows a layered data processing approach, organizing data into **B
 4. **Data Lake Organization:** Store data in Bronze, Silver, and Gold layers, using Parquet for analytical datasets where appropriate.
 5. **Batch-Stream Integration:** Combine historical records with processed streaming data to support unified transportation analytics.
 6. **Orchestration:** Use Airflow to schedule workflows, manage dependencies, and monitor pipeline execution.
-7. **Analytics & Visualization:** Develop a dashboard for exploring collision trends, traffic patterns, and other relevant metrics.
-8. **Cloud Deployment:** Extend the local architecture to AWS for cloud-based storage and processing.
+7. **Warehouse:** Snowpipe loads Silver data from S3 into Snowflake, where fact and dimension tables are modeled.
+8. **Analytics & Visualization:** A dashboard on top of Snowflake for fleet status, collision trends, and hotspots.
+9. **Cloud Deployment:** The same code runs locally or on EC2 against S3; only environment variables change.
+
+```
+NYC Collisions API ─► Python/PySpark batch ─┐
+                                            ├─► S3 Bronze ─► Silver ─► Gold (Parquet)
+10-vehicle simulator ─► Kafka ─► Spark SS ──┘                 │
+                                                              ▼
+                                         Snowflake (Snowpipe ─► star schema ─► views)
+                                                              │
+                                                              ▼
+                                                          Dashboard
+Airflow schedules and monitors the batch jobs.
+```
+
+## Configuration
+
+All paths and connection settings live in `src/common/config.py` and are read from environment variables or a `.env` file. Copy `.env.example` to `.env` to get started.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `DATA_ROOT` | `./data` | Where Bronze/Silver/Gold live. Set to `s3://<bucket>` to use S3. |
+| `CHECKPOINT_ROOT` | `./checkpoints` | Spark streaming checkpoints. |
+| `KAFKA_BOOTSTRAP_SERVERS` | `localhost:29092` | Kafka broker address. |
+| `STREAM_TRIGGER_INTERVAL` | `1 minute` | How often streaming writes a Bronze file. |
+| `MAINTENANCE_INTERVAL_MILES` / `MAINTENANCE_DUE_WINDOW_MILES` | `5000` / `250` | Fleet service rule. |
+
+## Running the pipelines
+
+Run from the project root (either `python src/...py` or `python -m src....` works):
+
+```bash
+docker compose up -d                                   # Kafka + Kafka UI
+
+# Collisions (batch)
+python src/ingestion/nyc_collisions_api.py --days-back 30
+python src/batch/transform_collisions.py
+python src/batch/transform_gold.py
+
+# Vehicle telemetry (streaming), each in its own terminal
+python src/streaming/vehicle_telemetry_producer.py
+python src/streaming/vehicle_telemetry_stream.py
+# then
+python src/batch/transform_vehicle_telemetry.py
+python src/batch/transform_vehicle_gold.py
+
+pytest                                                 # data-quality checks
+```
+
+AWS setup steps are in [`infra/aws/README.md`](infra/aws/README.md).
 
 ## Development Environment
 
@@ -42,11 +91,13 @@ The environment is designed to keep application code, service configuration, and
 - [x] Development environment verified
 - [x] Local Kafka infrastructure
 - [x] Historical batch pipeline
-- [ ] Streaming pipeline
-- [ ] Batch-stream integration
+- [x] Streaming pipeline (Kafka → Spark → Bronze/Silver/Gold)
+- [x] Environment-driven config (local or S3)
+- [ ] AWS S3 data lake + EC2 host
+- [ ] Snowflake ingestion (Snowpipe) and star schema
+- [ ] Batch-stream integration (fleet vs. collision hotspots)
 - [ ] Airflow orchestration
 - [ ] Dashboard development
-- [ ] AWS deployment
 
 ## Project Goals
 

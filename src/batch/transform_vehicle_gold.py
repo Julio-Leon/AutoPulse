@@ -1,60 +1,45 @@
 
-import logging
 import sys
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+if __package__ in (None, ""):
+    # Allow `python src/batch/transform_vehicle_gold.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from pyspark.sql import functions as F
 from pyspark.sql.window import Window
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "vehicle_telemetry"
-GOLD_DIR = PROJECT_ROOT / "data" / "gold" / "vehicle_fleet_summary"
-
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "transform_vehicle_gold.log"
-
-# Illustrative maintenance interval for this project.
-# Later, make this configurable per vehicle.
-MAINTENANCE_INTERVAL_MILES = 5000
+from src.common import config
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
-)
+SILVER_DIR = config.SILVER_VEHICLE_TELEMETRY
+GOLD_DIR = config.GOLD_VEHICLE_FLEET_SUMMARY
 
-logger = logging.getLogger(__name__)
+# Illustrative service schedule: every MAINTENANCE_INTERVAL_MILES miles, with a
+# "service_due" flag once a vehicle is within MAINTENANCE_DUE_WINDOW_MILES of
+# its next service. Both are configurable in .env.
+MAINTENANCE_INTERVAL_MILES = config.MAINTENANCE_INTERVAL_MILES
+MAINTENANCE_DUE_WINDOW_MILES = config.MAINTENANCE_DUE_WINDOW_MILES
+
+logger = config.setup_logging("transform_vehicle_gold.log", "autopulse.vehicle_gold")
 
 
 def main():
     spark = None
 
     try:
-        if not SILVER_DIR.exists():
+        logger.info("Starting vehicle Gold job | %s", config.describe())
+
+        spark = config.build_spark(
+            "AutoPulse-Vehicle-Gold-Analytics", shuffle_partitions=4
+        )
+
+        if not config.path_exists(spark, SILVER_DIR):
             raise FileNotFoundError(
                 f"Vehicle Silver directory not found: {SILVER_DIR}"
             )
 
-        spark = (
-            SparkSession.builder
-            .appName("AutoPulse-Vehicle-Gold-Analytics")
-            .master("local[*]")
-            .config("spark.sql.shuffle.partitions", "4")
-            .getOrCreate()
-        )
-
-        spark.sparkContext.setLogLevel("WARN")
-
-        silver_df = spark.read.parquet(str(SILVER_DIR))
+        silver_df = spark.read.parquet(SILVER_DIR)
 
         # Use the event timestamp to identify the first and latest
         # observations for each vehicle.
@@ -120,15 +105,26 @@ def main():
                     F.lit(0.0),
                 ),
             )
+            # Previously: flagged only when the odometer was an exact multiple
+            # of the interval (e.g. exactly 15000 miles), which almost never
+            # happens. Now: miles remaining until the next scheduled service.
+            .withColumn(
+                "miles_until_service",
+                F.round(
+                    F.lit(float(MAINTENANCE_INTERVAL_MILES))
+                    - F.pmod(
+                        F.col("latest_odometer_miles"),
+                        F.lit(float(MAINTENANCE_INTERVAL_MILES)),
+                    ),
+                    2,
+                ),
+            )
             .withColumn(
                 "maintenance_status",
                 F.when(
-                    F.pmod(
-                        F.floor(F.col("latest_odometer_miles")).cast("long"),
-                        F.lit(MAINTENANCE_INTERVAL_MILES),
-                    ) == 0,
-                    F.lit("check_service_interval"),
-                ).otherwise(F.lit("no_interval_alert")),
+                    F.col("miles_until_service") <= MAINTENANCE_DUE_WINDOW_MILES,
+                    F.lit("service_due"),
+                ).otherwise(F.lit("ok")),
             )
             .withColumn(
                 "observation_window_minutes",
@@ -150,6 +146,7 @@ def main():
                 "latest_fuel_level_pct",
                 "latest_engine_status",
                 "latest_odometer_miles",
+                "miles_until_service",
                 "maintenance_status",
             )
             .orderBy("vehicle_id")
@@ -157,7 +154,7 @@ def main():
 
         row_count = gold_df.count()
 
-        gold_df.write.mode("overwrite").parquet(str(GOLD_DIR))
+        gold_df.coalesce(1).write.mode("overwrite").parquet(GOLD_DIR)
 
         logger.info("Silver input records: %s", silver_df.count())
         logger.info("Gold vehicle summaries: %s", row_count)

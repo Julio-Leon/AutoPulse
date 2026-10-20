@@ -1,28 +1,20 @@
 
-from pathlib import Path
-
 import pytest
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
-from pathlib import Path
-from pyspark.sql import functions as F
+from src.common import config
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SILVER_DIR = PROJECT_ROOT / "data" / "silver" / "collisions"
-GOLD_DIR = PROJECT_ROOT / "data" / "gold"
+# Paths come from config, so the same tests run against local data or S3
+# (set DATA_ROOT in .env).
+SILVER_DIR = config.SILVER_COLLISIONS
+GOLD_DIR = config.GOLD_ROOT
+VEHICLE_SILVER_DIR = config.SILVER_VEHICLE_TELEMETRY
+VEHICLE_QUARANTINE_DIR = config.QUARANTINE_VEHICLE_TELEMETRY
 
 
 @pytest.fixture(scope="session")
 def spark():
-    session = (
-        SparkSession.builder
-        .appName("AutoPulse-Data-Quality-Tests")
-        .master("local[*]")
-        .config("spark.sql.shuffle.partitions", "4")
-        .getOrCreate()
-    )
+    session = config.build_spark("AutoPulse-Data-Quality-Tests", shuffle_partitions=4)
 
     yield session
 
@@ -31,13 +23,13 @@ def spark():
 
 @pytest.fixture(scope="session")
 def silver_df(spark):
-    if not SILVER_DIR.exists():
+    if not config.path_exists(spark, SILVER_DIR):
         pytest.fail(
             f"Silver data not found at {SILVER_DIR}. "
             "Run the Bronze-to-Silver pipeline first."
         )
 
-    return spark.read.parquet(str(SILVER_DIR))
+    return spark.read.parquet(SILVER_DIR)
 
 
 def test_silver_dataset_is_not_empty(silver_df):
@@ -101,6 +93,26 @@ def test_valid_coordinates_are_within_geographic_bounds(silver_df):
     assert invalid_coordinates == 0
 
 
+def test_silver_boroughs_are_standardized(silver_df):
+    assert {"borough", "borough_known"} <= set(silver_df.columns)
+
+    # No null/blank boroughs: missing values must be "UNKNOWN".
+    assert silver_df.filter(
+        F.col("borough").isNull() | (F.trim(F.col("borough")) == "")
+    ).count() == 0
+
+    # The flag must agree with the value.
+    assert silver_df.filter(
+        (F.col("borough_known") & (F.col("borough") == "UNKNOWN"))
+        | (~F.col("borough_known") & (F.col("borough") != "UNKNOWN"))
+    ).count() == 0
+
+
+def test_gold_borough_summary_excludes_unknown(spark):
+    df = spark.read.parquet(f"{GOLD_DIR}/borough_summary")
+    assert df.filter(F.col("borough") == "UNKNOWN").count() == 0
+
+
 @pytest.mark.parametrize(
     "dataset_name, required_columns",
     [
@@ -135,13 +147,13 @@ def test_valid_coordinates_are_within_geographic_bounds(silver_df):
     ],
 )
 def test_gold_dataset_exists_and_has_required_columns(spark, dataset_name, required_columns):
-    dataset_path = GOLD_DIR / dataset_name
+    dataset_path = f"{GOLD_DIR}/{dataset_name}"
 
-    assert dataset_path.exists(), (
+    assert config.path_exists(spark, dataset_path), (
         f"Gold dataset does not exist: {dataset_path}"
     )
 
-    df = spark.read.parquet(str(dataset_path))
+    df = spark.read.parquet(dataset_path)
 
     assert df.count() > 0, (
         f"Gold dataset is empty: {dataset_name}"
@@ -163,13 +175,13 @@ def test_gold_dataset_exists_and_has_required_columns(spark, dataset_name, requi
     ],
 )
 def test_gold_collision_counts_are_positive(spark, dataset_name):
-    dataset_path = GOLD_DIR / dataset_name
+    dataset_path = f"{GOLD_DIR}/{dataset_name}"
 
-    assert dataset_path.exists(), (
+    assert config.path_exists(spark, dataset_path), (
         f"Gold dataset does not exist: {dataset_path}"
     )
 
-    df = spark.read.parquet(str(dataset_path))
+    df = spark.read.parquet(dataset_path)
 
     invalid_counts = df.filter(
         F.col("collision_count").isNull()
@@ -184,23 +196,12 @@ def test_gold_collision_counts_are_positive(spark, dataset_name):
 # Vehicle telemetry data quality tests
 # --------------------------------------------------
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-VEHICLE_SILVER_DIR = (
-    PROJECT_ROOT / "data" / "silver" / "vehicle_telemetry"
-)
-
-VEHICLE_QUARANTINE_DIR = (
-    PROJECT_ROOT / "data" / "quarantine" / "vehicle_telemetry"
-)
-
-
 @pytest.fixture(scope="session")
 def vehicle_silver_df(spark):
-    assert VEHICLE_SILVER_DIR.exists(), (
+    assert config.path_exists(spark, VEHICLE_SILVER_DIR), (
         f"Vehicle Silver directory not found: {VEHICLE_SILVER_DIR}"
     )
-    return spark.read.parquet(str(VEHICLE_SILVER_DIR))
+    return spark.read.parquet(VEHICLE_SILVER_DIR)
 
 
 def test_vehicle_silver_dataset_is_not_empty(vehicle_silver_df):
@@ -275,10 +276,10 @@ def test_vehicle_engine_status_is_valid(vehicle_silver_df):
 
 
 def test_quarantine_records_have_validation_reasons(spark):
-    if not VEHICLE_QUARANTINE_DIR.exists():
+    if not config.path_exists(spark, VEHICLE_QUARANTINE_DIR):
         pytest.skip("No vehicle quarantine dataset was created")
 
-    quarantine_df = spark.read.parquet(str(VEHICLE_QUARANTINE_DIR))
+    quarantine_df = spark.read.parquet(VEHICLE_QUARANTINE_DIR)
 
     if quarantine_df.count() == 0:
         pytest.skip("Vehicle quarantine dataset is empty")
@@ -288,4 +289,35 @@ def test_quarantine_records_have_validation_reasons(spark):
     assert quarantine_df.filter(
         F.col("validation_error").isNull()
         | (F.trim(F.col("validation_error")) == "")
+    ).count() == 0
+
+
+# --------------------------------------------------
+# Vehicle Gold tests
+# --------------------------------------------------
+
+def test_vehicle_gold_maintenance_fields_are_consistent(spark):
+    gold_path = config.GOLD_VEHICLE_FLEET_SUMMARY
+
+    if not config.path_exists(spark, gold_path):
+        pytest.skip("Vehicle Gold dataset has not been built yet")
+
+    gold_df = spark.read.parquet(gold_path)
+
+    assert {"miles_until_service", "maintenance_status"} <= set(gold_df.columns)
+
+    interval = config.MAINTENANCE_INTERVAL_MILES
+    window = config.MAINTENANCE_DUE_WINDOW_MILES
+
+    # miles_until_service must be within [0, interval].
+    assert gold_df.filter(
+        F.col("miles_until_service").isNull()
+        | (F.col("miles_until_service") < 0)
+        | (F.col("miles_until_service") > interval)
+    ).count() == 0
+
+    # Status must agree with the due window.
+    assert gold_df.filter(
+        ((F.col("miles_until_service") <= window) & (F.col("maintenance_status") != "service_due"))
+        | ((F.col("miles_until_service") > window) & (F.col("maintenance_status") != "ok"))
     ).count() == 0

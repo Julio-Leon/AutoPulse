@@ -1,34 +1,22 @@
 
 import json
-import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+if __package__ in (None, ""):
+    # Allow `python src/streaming/traffic_producer.py` as well as `python -m ...`.
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from kafka import KafkaProducer
 from kafka.errors import KafkaError
 
+from src.common import config
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-LOG_DIR = PROJECT_ROOT / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+logger = config.setup_logging("traffic_producer.log", "autopulse.traffic_producer")
 
-LOG_FILE = LOG_DIR / "traffic_producer.log"
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
-    force=True,
-)
-
-logger = logging.getLogger(__name__)
-
-BOOTSTRAP_SERVERS = "localhost:29092"
-TOPIC = "traffic.incidents.raw"
+BOOTSTRAP_SERVERS = config.KAFKA_BOOTSTRAP_SERVERS
+TOPIC = config.TRAFFIC_INCIDENTS_TOPIC
 
 
 def main():
