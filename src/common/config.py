@@ -11,10 +11,13 @@ Storage
 DATA_ROOT decides where the Bronze / Silver / Gold layers live:
 
     DATA_ROOT unset                      -> <project>/data          (local)
-    DATA_ROOT=s3://my-bucket             -> s3a://my-bucket          (S3)
+    DATA_ROOT=s3://my-bucket             -> s3://my-bucket           (S3)
 
-`s3://` is converted to `s3a://` automatically because that is the scheme
-Spark's Hadoop S3 connector uses.
+Paths always use `s3://`, on every runtime. Self-managed Spark (WSL, EC2)
+maps `s3://` to the hadoop-aws S3A connector. Glue uses `s3://` natively.
+Using the same scheme everywhere matters: Spark streaming's file logs
+(`_spark_metadata`) store full file paths, and a reader using a different
+scheme (s3a vs s3) silently finds no files.
 """
 
 from __future__ import annotations
@@ -40,10 +43,18 @@ def _env(name: str, default: str) -> str:
     return value.strip() if value and value.strip() else default
 
 
+# Where the code is running:
+#   local  - WSL / EC2 with self-managed Spark (default)
+#   glue   - AWS Glue job (Spark is provided; S3 via s3:// natively)
+#   lambda - AWS Lambda (no Spark)
+RUNTIME = _env("AUTOPULSE_RUNTIME", "local").lower()
+
+
 def _normalize_root(root: str) -> str:
     root = root.rstrip("/")
-    if root.startswith("s3://"):
-        root = "s3a://" + root[len("s3://"):]
+    # One scheme everywhere (see the module docstring).
+    if root.startswith("s3a://"):
+        root = "s3://" + root[len("s3a://"):]
     return root
 
 
@@ -65,7 +76,15 @@ AWS_REGION = _env("AWS_REGION", "us-east-1")
 
 def is_s3(path: str | None = None) -> bool:
     """True when the given path (default: DATA_ROOT) is on S3."""
-    return (path or DATA_ROOT).startswith("s3a://")
+    return (path or DATA_ROOT).startswith(("s3a://", "s3://"))
+
+
+def split_s3_uri(uri: str) -> tuple[str, str]:
+    """'s3a://bucket/a/b' -> ('bucket', 'a/b')."""
+    if not is_s3(uri):
+        raise ValueError(f"Not an S3 path: {uri}")
+    bucket, _, key = uri.split("://", 1)[1].partition("/")
+    return bucket, key.strip("/")
 
 
 def lake_path(*parts: str) -> str:
@@ -148,16 +167,29 @@ def _spark_versions() -> tuple[str, str, str]:
     return spark_version, scala, hadoop_aws
 
 
+def _aws_credentials_provider(hadoop_aws_version: str) -> str:
+    """AWS SDK default credential chain class for the hadoop-aws version in use."""
+    if hadoop_aws_version.startswith("3.3"):
+        # hadoop-aws 3.3.x uses AWS SDK v1.
+        return "com.amazonaws.auth.DefaultAWSCredentialsProviderChain"
+    # hadoop-aws 3.4+ uses AWS SDK v2.
+    return "software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider"
+
+
 def build_spark(app_name: str, shuffle_partitions: int = 4, kafka: bool = False):
     """
     Create a SparkSession configured for local disk or S3.
 
     - kafka=True adds the Spark Kafka connector (needed by the streaming job).
     - When DATA_ROOT or CHECKPOINT_ROOT is on S3, the hadoop-aws connector is
-      added. Credentials come from the default AWS chain: environment
-      variables, ~/.aws profile, or the EC2 instance role (preferred in AWS).
+      added. Credentials come from the AWS SDK default chain: environment
+      variables, the ~/.aws profile written by `aws configure`, or the EC2
+      instance role (preferred in AWS).
     """
     from pyspark.sql import SparkSession
+
+    if RUNTIME == "glue":
+        return _build_glue_spark(app_name, shuffle_partitions)
 
     spark_version, scala, hadoop_aws = _spark_versions()
 
@@ -175,6 +207,9 @@ def build_spark(app_name: str, shuffle_partitions: int = 4, kafka: bool = False)
         .master(SPARK_MASTER)
         .config("spark.sql.shuffle.partitions", str(shuffle_partitions))
         .config("spark.sql.session.timeZone", "UTC")
+        # Standard Parquet timestamps (instead of legacy INT96) so Snowflake
+        # reads them reliably.
+        .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
     )
 
     if packages:
@@ -183,13 +218,38 @@ def build_spark(app_name: str, shuffle_partitions: int = 4, kafka: bool = False)
     if is_s3(DATA_ROOT) or is_s3(CHECKPOINT_ROOT):
         builder = (
             builder
+            # Serve s3:// paths with the S3A connector (same scheme as Glue).
+            .config("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+            .config("spark.hadoop.fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A")
             .config("spark.hadoop.fs.s3a.endpoint.region", AWS_REGION)
             .config("spark.hadoop.fs.s3a.fast.upload", "true")
+            # Same credential lookup as the AWS CLI: env vars, ~/.aws profile
+            # (from `aws configure`), then the EC2 instance role. Hadoop's own
+            # default chain skips the ~/.aws profile.
+            .config("spark.hadoop.fs.s3a.aws.credentials.provider", _aws_credentials_provider(hadoop_aws))
             # Avoid _SUCCESS marker files being picked up by Snowpipe.
             .config("spark.hadoop.mapreduce.fileoutputcommitter.marksuccessfuljobs", "false")
         )
 
     spark = builder.getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+    return spark
+
+
+def _build_glue_spark(app_name: str, shuffle_partitions: int):
+    """
+    In AWS Glue, Spark, S3 access (s3://) and credentials (the Glue job role)
+    are already set up; only apply the AutoPulse session settings.
+    """
+    from pyspark.sql import SparkSession
+
+    spark = SparkSession.builder.appName(app_name).getOrCreate()
+    spark.conf.set("spark.sql.shuffle.partitions", str(shuffle_partitions))
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    spark.conf.set("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")
+    spark.sparkContext._jsc.hadoopConfiguration().set(
+        "mapreduce.fileoutputcommitter.marksuccessfuljobs", "false"
+    )
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
@@ -207,16 +267,23 @@ def path_exists(spark, path: str) -> bool:
 # --------------------------------------------------
 
 def setup_logging(log_file_name: str, logger_name: str) -> logging.Logger:
-    """Log to logs/<log_file_name> (overwritten each run) and to stdout."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    """
+    Log to stdout, and locally also to logs/<log_file_name> (overwritten each
+    run). In Glue and Lambda, stdout goes to CloudWatch Logs and the code's
+    folder is read-only, so no log file is written.
+    """
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+
+    if RUNTIME == "local":
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        handlers.insert(
+            0, logging.FileHandler(LOG_DIR / log_file_name, mode="w", encoding="utf-8")
+        )
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-        handlers=[
-            logging.FileHandler(LOG_DIR / log_file_name, mode="w", encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
+        handlers=handlers,
         force=True,
     )
     return logging.getLogger(logger_name)
@@ -225,6 +292,6 @@ def setup_logging(log_file_name: str, logger_name: str) -> logging.Logger:
 def describe() -> str:
     """One-line summary of the active configuration, for logs."""
     return (
-        f"DATA_ROOT={DATA_ROOT} | CHECKPOINT_ROOT={CHECKPOINT_ROOT} | "
+        f"RUNTIME={RUNTIME} | DATA_ROOT={DATA_ROOT} | CHECKPOINT_ROOT={CHECKPOINT_ROOT} | "
         f"KAFKA={KAFKA_BOOTSTRAP_SERVERS} | SPARK_MASTER={SPARK_MASTER}"
     )

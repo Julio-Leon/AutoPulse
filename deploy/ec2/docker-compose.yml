@@ -1,0 +1,156 @@
+# AutoPulse EC2 host
+#   kafka       event broker (internal only)
+#   simulator   10-vehicle telemetry producer -> Kafka
+#   streaming   Spark Structured Streaming: Kafka -> S3 Bronze (1-minute micro-batches)
+#   airflow-*   scheduler + web UI (LocalExecutor, Postgres metadata DB)
+#
+# Started by bootstrap.sh at first boot; updated by update.sh.
+# Settings come from .env next to this file (written by bootstrap.sh).
+# AWS access: the instance role (no keys).
+
+name: autopulse
+
+x-airflow-env: &airflow-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+  AIRFLOW__CORE__DEFAULT_TIMEZONE: America/New_York
+  AIRFLOW__WEBSERVER__DEFAULT_UI_TIMEZONE: America/New_York
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+  AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: "60"
+  # Use the EC2 instance role; just set the region.
+  AIRFLOW_CONN_AWS_DEFAULT: '{"conn_type": "aws", "extra": {"region_name": "${AWS_REGION:-us-east-1}"}}'
+  AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-1}
+  AUTOPULSE_TELEMETRY_SCHEDULE: ${AUTOPULSE_TELEMETRY_SCHEDULE:-*/15 * * * *}
+  AUTOPULSE_COLLISIONS_SCHEDULE: ${AUTOPULSE_COLLISIONS_SCHEDULE:-0 6 * * *}
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:2.10.5-python3.12
+  environment: *airflow-env
+  volumes:
+    - ../../airflow/dags:/opt/airflow/dags:ro
+    - airflow_logs:/opt/airflow/logs
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+x-pipeline-common: &pipeline-common
+  build:
+    context: ../..
+    dockerfile: deploy/ec2/Dockerfile
+  image: autopulse-pipeline:latest
+  depends_on:
+    kafka:
+      condition: service_healthy
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+services:
+  # ---------------------------------------------------------------- Kafka
+  kafka:
+    image: apache/kafka:3.9.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      # Keep 7 days of events.
+      KAFKA_LOG_RETENTION_HOURS: 168
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- Pipeline
+  simulator:
+    <<: *pipeline-common
+    command: ["python", "-m", "src.streaming.vehicle_telemetry_producer"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SIMULATOR_PUBLISH_INTERVAL_SECONDS: ${SIMULATOR_PUBLISH_INTERVAL_SECONDS:-5}
+    volumes:
+      - simulator_state:/app/data/raw
+
+  streaming:
+    <<: *pipeline-common
+    command: ["python", "-m", "src.streaming.vehicle_telemetry_stream"]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      DATA_ROOT: s3://${BUCKET}
+      CHECKPOINT_ROOT: s3://${BUCKET}/_checkpoints
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      STREAM_TRIGGER_INTERVAL: ${STREAM_TRIGGER_INTERVAL:-1 minute}
+    volumes:
+      # Cache of the Spark Kafka/S3 connector jars (downloaded on first start).
+      - spark_ivy_cache:/root/.ivy2.5.2
+
+  # ---------------------------------------------------------------- Airflow
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 10s
+      retries: 10
+    restart: unless-stopped
+
+  airflow-init:
+    <<: *airflow-common
+    command: version
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?set AIRFLOW_ADMIN_PASSWORD in .env}
+    restart: "no"
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    # Only reachable from the instance itself; open it with an SSM port forward.
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  kafka_data:
+  simulator_state:
+  spark_ivy_cache:
+  postgres_data:
+  airflow_logs:

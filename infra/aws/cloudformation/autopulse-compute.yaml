@@ -1,0 +1,264 @@
+# NOT USED in the AutoPulse AWS account: CloudFormation is denied there.
+# infra/aws/deploy.py creates the same resources with boto3. This template is
+# kept for accounts where CloudFormation is available; keep the two in sync.
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  AutoPulse serverless compute: Lambda (collisions ingestion), Glue jobs
+  (Bronze -> Silver), and the IAM roles they need, plus the EC2 role for the
+  Airflow/Kafka host and (optionally) the Snowflake read role.
+  Deploy with infra/aws/deploy.sh.
+
+Parameters:
+  BucketName:
+    Type: String
+    Default: autopulse-julio-leon
+    Description: Existing S3 data-lake bucket.
+  CodeVersion:
+    Type: String
+    Description: Version suffix of the uploaded code zip (set by deploy.sh).
+  PandasLayerArn:
+    Type: String
+    Default: arn:aws:lambda:us-east-1:336392948345:layer:AWSSDKPandas-Python312:31
+    Description: AWS-managed layer providing pyarrow for Python 3.12.
+  NycOpenDataAppToken:
+    Type: String
+    Default: ""
+    NoEcho: true
+    Description: Optional Socrata app token (higher API rate limits).
+  SnowflakeIamUserArn:
+    Type: String
+    Default: ""
+    Description: STORAGE_AWS_IAM_USER_ARN from DESC INTEGRATION AUTOPULSE_S3_INT. Leave empty to skip the Snowflake role.
+  SnowflakeExternalId:
+    Type: String
+    Default: ""
+    Description: STORAGE_AWS_EXTERNAL_ID from DESC INTEGRATION AUTOPULSE_S3_INT.
+
+Conditions:
+  CreateSnowflakeRole: !Not [!Equals [!Ref SnowflakeIamUserArn, ""]]
+
+Resources:
+  # ------------------------------------------------------------------
+  # IAM roles
+  # ------------------------------------------------------------------
+  GlueJobRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoPulseGlueJobRole
+      Description: Runs the AutoPulse Glue jobs.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: glue.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: AutoPulseDataLakeReadWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !Sub arn:aws:s3:::${BucketName}
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload]
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoPulseLambdaRole
+      Description: Runs the AutoPulse collisions-ingestion Lambda.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AutoPulseBronzeCollisionsWrite
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !Sub arn:aws:s3:::${BucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix: [bronze/collisions/*]
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub arn:aws:s3:::${BucketName}/bronze/collisions/*
+
+  Ec2HostRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AutoPulseEc2HostRole
+      Description: EC2 host running Kafka, the simulator, Spark streaming and Airflow.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Browser-based shell via Systems Manager (no SSH keys or open ports).
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: AutoPulseHostAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation, s3:ListBucketMultipartUploads]
+                Resource: !Sub arn:aws:s3:::${BucketName}
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject, s3:AbortMultipartUpload, s3:ListMultipartUploadParts]
+                Resource: !Sub arn:aws:s3:::${BucketName}/*
+              # Airflow triggers the Lambda and Glue jobs.
+              - Effect: Allow
+                Action: lambda:InvokeFunction
+                Resource: !GetAtt CollisionsIngestionFunction.Arn
+              - Effect: Allow
+                Action: [glue:StartJobRun, glue:GetJobRun, glue:GetJobRuns, glue:BatchStopJobRun, glue:GetJob]
+                Resource:
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${CollisionsSilverJob}
+                  - !Sub arn:aws:glue:${AWS::Region}:${AWS::AccountId}:job/${VehicleTelemetrySilverJob}
+              # Airflow's Glue operator reads the job's CloudWatch logs.
+              - Effect: Allow
+                Action: [logs:GetLogEvents, logs:DescribeLogStreams, logs:FilterLogEvents]
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws-glue/*
+
+  Ec2HostInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: AutoPulseEc2HostProfile
+      Roles: [!Ref Ec2HostRole]
+
+  SnowflakeRole:
+    Type: AWS::IAM::Role
+    Condition: CreateSnowflakeRole
+    Properties:
+      RoleName: AutoPulseSnowflakeRole
+      Description: Read-only access for the Snowflake storage integration AUTOPULSE_S3_INT.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { AWS: !Ref SnowflakeIamUserArn }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref SnowflakeExternalId
+      Policies:
+        - PolicyName: AutoPulseSnowflakeS3Read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetObject, s3:GetObjectVersion]
+                Resource:
+                  - !Sub arn:aws:s3:::${BucketName}/silver/*
+                  - !Sub arn:aws:s3:::${BucketName}/gold/*
+              - Effect: Allow
+                Action: [s3:ListBucket, s3:GetBucketLocation]
+                Resource: !Sub arn:aws:s3:::${BucketName}
+                Condition:
+                  StringLike:
+                    s3:prefix: [silver/*, gold/*]
+
+  # ------------------------------------------------------------------
+  # Lambda: NYC collisions API -> Bronze
+  # ------------------------------------------------------------------
+  CollisionsIngestionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/autopulse-collisions-ingestion
+      RetentionInDays: 14
+
+  CollisionsIngestionFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: CollisionsIngestionLogGroup
+    Properties:
+      FunctionName: autopulse-collisions-ingestion
+      Description: NYC collisions API -> S3 Bronze (partitioned by crash date)
+      Runtime: python3.12
+      Handler: src.lambda_functions.collisions_ingestion.handler
+      Role: !GetAtt LambdaRole.Arn
+      Code:
+        S3Bucket: !Ref BucketName
+        S3Key: !Sub artifacts/autopulse_src-${CodeVersion}.zip
+      Layers: [!Ref PandasLayerArn]
+      MemorySize: 1024
+      Timeout: 900
+      Environment:
+        Variables:
+          AUTOPULSE_RUNTIME: lambda
+          DATA_ROOT: !Sub s3://${BucketName}
+          NYC_OPEN_DATA_APP_TOKEN: !Ref NycOpenDataAppToken
+
+  # ------------------------------------------------------------------
+  # Glue jobs: Bronze -> Silver (same PySpark code as local runs)
+  # ------------------------------------------------------------------
+  CollisionsSilverJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: autopulse-collisions-silver
+      Description: Collisions Bronze -> Silver (src/batch/transform_collisions.py)
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "5.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 30
+      MaxRetries: 0
+      ExecutionProperty: { MaxConcurrentRuns: 1 }
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${BucketName}/artifacts/glue/collisions_silver_job-${CodeVersion}.py
+      DefaultArguments:
+        --DATA_ROOT: !Sub s3://${BucketName}
+        --extra-py-files: !Sub s3://${BucketName}/artifacts/autopulse_src-${CodeVersion}.zip
+        --enable-continuous-cloudwatch-log: "true"
+        --enable-metrics: "true"
+        --job-language: python
+
+  VehicleTelemetrySilverJob:
+    Type: AWS::Glue::Job
+    Properties:
+      Name: autopulse-vehicle-telemetry-silver
+      Description: Vehicle telemetry Bronze -> Silver + quarantine (src/batch/transform_vehicle_telemetry.py)
+      Role: !GetAtt GlueJobRole.Arn
+      GlueVersion: "5.0"
+      WorkerType: G.1X
+      NumberOfWorkers: 2
+      Timeout: 30
+      MaxRetries: 0
+      ExecutionProperty: { MaxConcurrentRuns: 1 }
+      Command:
+        Name: glueetl
+        PythonVersion: "3"
+        ScriptLocation: !Sub s3://${BucketName}/artifacts/glue/vehicle_telemetry_silver_job-${CodeVersion}.py
+      DefaultArguments:
+        --DATA_ROOT: !Sub s3://${BucketName}
+        --extra-py-files: !Sub s3://${BucketName}/artifacts/autopulse_src-${CodeVersion}.zip
+        --enable-continuous-cloudwatch-log: "true"
+        --enable-metrics: "true"
+        --job-language: python
+
+Outputs:
+  CollisionsIngestionFunctionName:
+    Value: !Ref CollisionsIngestionFunction
+  CollisionsSilverJobName:
+    Value: !Ref CollisionsSilverJob
+  VehicleTelemetrySilverJobName:
+    Value: !Ref VehicleTelemetrySilverJob
+  Ec2HostInstanceProfileName:
+    Value: !Ref Ec2HostInstanceProfile
+  SnowflakeRoleArn:
+    Condition: CreateSnowflakeRole
+    Value: !GetAtt SnowflakeRole.Arn

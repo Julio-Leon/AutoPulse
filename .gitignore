@@ -1,5 +1,6 @@
 # Python
 .venv/
+virtualenv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -14,6 +15,7 @@ data/raw/*
 data/bronze/*
 data/silver/*
 data/gold/*
+data/quarantine/
 !data/raw/.gitkeep
 !data/bronze/.gitkeep
 !data/silver/.gitkeep
@@ -28,3 +30,6 @@ logs/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Deploy packaging output (infra/aws/deploy.sh)
+build/

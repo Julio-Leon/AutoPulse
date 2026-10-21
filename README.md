@@ -14,7 +14,10 @@ The project follows a layered data processing approach, organizing data into **B
 - **Apache Airflow** — Workflow orchestration, scheduling, and pipeline dependency management.
 - **Apache Parquet** — Columnar storage format for efficient analytical processing.
 - **AWS S3** — Data lake for the Bronze, Silver, and Gold layers.
-- **AWS EC2** — Single cloud host running Kafka, the simulator, Spark jobs, and Airflow via Docker Compose.
+- **AWS Lambda** — Serverless ingestion of the NYC collisions API into S3 Bronze.
+- **AWS Glue** — Serverless Spark jobs for Bronze → Silver (same PySpark code as local runs).
+- **AWS EC2** — Host running Kafka, the vehicle simulator, Spark Structured Streaming, and Airflow via Docker Compose.
+- **boto3 deploy script** — Lambda, Glue jobs and IAM roles deployed as code (`infra/aws/deploy.py`, policies in `infra/aws/iam/`).
 - **Snowflake** — Analytics warehouse: Snowpipe auto-ingestion from S3 and a star schema (facts and dimensions) built in SQL.
 - **Docker & Docker Compose** — Containerized services and reproducible local development environments.
 - **Git & GitHub** — Version control, source code management, and collaboration.
@@ -30,18 +33,19 @@ The project follows a layered data processing approach, organizing data into **B
 6. **Orchestration:** Use Airflow to schedule workflows, manage dependencies, and monitor pipeline execution.
 7. **Warehouse:** Snowpipe loads Silver data from S3 into Snowflake, where fact and dimension tables are modeled.
 8. **Analytics & Visualization:** A dashboard on top of Snowflake for fleet status, collision trends, and hotspots.
-9. **Cloud Deployment:** The same code runs locally or on EC2 against S3; only environment variables change.
+9. **Cloud Deployment:** Lambda and Glue run the batch steps, and EC2 runs the always-on streaming services. The same code also runs locally against disk or S3.
 
 ```
-NYC Collisions API ─► Python/PySpark batch ─┐
-                                            ├─► S3 Bronze ─► Silver ─► Gold (Parquet)
-10-vehicle simulator ─► Kafka ─► Spark SS ──┘                 │
-                                                              ▼
-                                         Snowflake (Snowpipe ─► star schema ─► views)
-                                                              │
-                                                              ▼
-                                                          Dashboard
-Airflow schedules and monitors the batch jobs.
+                    ┌──────────── Airflow (EC2) schedules and monitors ────────────┐
+                    ▼                                                              ▼
+NYC Collisions API ─► Lambda ──────────────┐                                  Glue jobs
+                                           ├─► S3 Bronze ──────────────────► (Spark) ─► S3 Silver
+10-vehicle simulator ─► Kafka ─► Spark SS ─┘   (EC2: Kafka, simulator, streaming)            │
+                                                                                             ▼
+                                                     Snowflake: Snowpipe ─► star schema ─► views
+                                                                                             │
+                                                                                             ▼
+                                                                                         Dashboard
 ```
 
 ## Configuration
@@ -78,7 +82,15 @@ python src/batch/transform_vehicle_gold.py
 pytest                                                 # data-quality checks
 ```
 
-AWS setup steps are in [`infra/aws/README.md`](infra/aws/README.md).
+AWS setup steps are in [`infra/aws/README.md`](infra/aws/README.md). In the cloud everything runs on its own:
+
+```bash
+python infra/aws/deploy.py           # IAM roles, Lambda, Glue jobs, code bundle (step 9)
+python infra/aws/ec2_host.py launch  # EC2 host: Kafka, simulator, streaming, Airflow (step 10)
+```
+
+Airflow then runs collisions daily (Lambda → Glue) and telemetry every 15 minutes (Glue).
+Snowflake setup (Snowpipe, star schema, views) is in [`snowflake/README.md`](snowflake/README.md).
 
 ## Development Environment
 
@@ -93,10 +105,12 @@ The environment is designed to keep application code, service configuration, and
 - [x] Historical batch pipeline
 - [x] Streaming pipeline (Kafka → Spark → Bronze/Silver/Gold)
 - [x] Environment-driven config (local or S3)
-- [ ] AWS S3 data lake + EC2 host
+- [x] AWS S3 data lake
+- [x] Lambda ingestion + Glue Silver jobs (deployed)
+- [ ] EC2 host (Kafka, simulator, streaming, Airflow)
 - [ ] Snowflake ingestion (Snowpipe) and star schema
 - [ ] Batch-stream integration (fleet vs. collision hotspots)
-- [ ] Airflow orchestration
+- [ ] Airflow orchestration (DAGs written; runs on the EC2 host)
 - [ ] Dashboard development
 
 ## Project Goals

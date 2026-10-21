@@ -3,3 +3,4 @@ python-dotenv
 kafka-python
 pyspark
 pytest
+boto3

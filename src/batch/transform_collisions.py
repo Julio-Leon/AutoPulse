@@ -17,6 +17,35 @@ LOG_FILE = config.LOG_DIR / "transform_collisions.log"
 
 logger = config.setup_logging(LOG_FILE.name, "autopulse.silver")
 
+# Columns every Silver collision row must have. The NYC API omits fields that
+# have no value, so a given ingestion window can be missing some of them
+# entirely (e.g. number_of_persons_killed). Missing ones are added as null so
+# downstream jobs and Snowflake always see the same schema.
+EXPECTED_COLUMNS = [
+    "collision_id",
+    "crash_date",
+    "crash_time",
+    "borough",
+    "zip_code",
+    "latitude",
+    "longitude",
+    "on_street_name",
+    "cross_street_name",
+    "off_street_name",
+    "number_of_persons_injured",
+    "number_of_persons_killed",
+    "number_of_pedestrians_injured",
+    "number_of_pedestrians_killed",
+    "number_of_cyclist_injured",
+    "number_of_cyclist_killed",
+    "number_of_motorist_injured",
+    "number_of_motorist_killed",
+    "contributing_factor_vehicle_1",
+    "contributing_factor_vehicle_2",
+    "vehicle_type_code1",
+    "vehicle_type_code2",
+]
+
 
 def main():
     spark = None
@@ -45,6 +74,17 @@ def main():
         logger.info("Bronze record count: %d", bronze_count)
         logger.info("Bronze column count: %d", len(df.columns))
         logger.info("Bronze schema:\n%s", df._jdf.schema().treeString())
+
+        # Make sure every expected column exists (see EXPECTED_COLUMNS).
+        missing_columns = [c for c in EXPECTED_COLUMNS if c not in df.columns]
+        for column in missing_columns:
+            df = df.withColumn(column, F.lit(None).cast("string"))
+
+        if missing_columns:
+            logger.warning(
+                "Columns absent from Bronze, added as null: %s",
+                ", ".join(missing_columns),
+            )
 
         # Standardize data types.
         logger.info("Casting collision ID, date, and coordinate columns.")
