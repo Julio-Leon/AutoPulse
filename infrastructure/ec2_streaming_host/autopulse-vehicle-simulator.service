@@ -1,0 +1,36 @@
+# AutoPulse - vehicle simulator as a service on the EC2 streaming host.
+#
+# Starts Kafka (Docker) and waits until it is healthy, then runs the simulator,
+# which sends 10 vehicles' telemetry to Kafka every 5 seconds, Monday to Friday,
+# 8:00-17:00 New York time (outside those hours it waits and sends nothing).
+# Starts at boot; restarts 10 seconds after a crash.
+#
+# Installed by setup_streaming_host.sh into /etc/systemd/system/.
+#   systemctl status autopulse-vehicle-simulator
+#   journalctl -u autopulse-vehicle-simulator -f
+
+[Unit]
+Description=AutoPulse vehicle simulator (Kafka producer)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/AutoPulse
+# Print each line right away, so it shows up in journalctl immediately.
+Environment=PYTHONUNBUFFERED=1
+# Fleet drives Mon-Fri 8:00-17:00 only.
+Environment=WORKING_HOURS_ONLY=true
+Environment=WORKDAY_START_HOUR=8
+Environment=WORKDAY_END_HOUR=17
+Environment=SCHEDULE_TIMEZONE=America/New_York
+ExecStartPre=/usr/bin/docker compose -f infrastructure/local_kafka/docker-compose.yml up -d --wait
+ExecStart=/home/ec2-user/autopulse-venv/bin/python sources/vehicle_simulator/simulate_vehicle_telemetry.py
+Restart=always
+RestartSec=10
+# The first start downloads the Kafka images.
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

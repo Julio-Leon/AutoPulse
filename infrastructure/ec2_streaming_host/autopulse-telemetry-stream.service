@@ -1,0 +1,28 @@
+# AutoPulse - telemetry stream (Kafka -> S3 Bronze) as a service on the EC2 streaming host.
+#
+# Runs Spark Structured Streaming: every 5 minutes, appends the new Kafka events
+# to s3://autopulse-julio-leon/bronze/vehicle_telemetry/. AWS access comes from
+# the instance role (AutoPulseEc2Role); no keys are stored on the host.
+# Starts at boot, after the simulator; restarts 30 seconds after a crash and
+# continues from its S3 checkpoint, so no events are lost or written twice.
+#
+# Installed by setup_streaming_host.sh into /etc/systemd/system/.
+#   systemctl status autopulse-telemetry-stream
+#   journalctl -u autopulse-telemetry-stream -f
+
+[Unit]
+Description=AutoPulse telemetry stream (Kafka -> S3 Bronze)
+Wants=network-online.target autopulse-vehicle-simulator.service
+After=network-online.target autopulse-vehicle-simulator.service
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/AutoPulse
+Environment=PYTHONUNBUFFERED=1
+Environment=AWS_REGION=us-east-1
+ExecStart=/home/ec2-user/autopulse-venv/bin/python ingestion/telemetry_stream/stream_telemetry_to_bronze.py
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

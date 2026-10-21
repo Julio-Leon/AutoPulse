@@ -1,6 +1,13 @@
-requests
-python-dotenv
-kafka-python
-pyspark
-pytest
-boto3
+# Python packages for running AutoPulse on your laptop (and later the EC2 host).
+#   pip install -r requirements.txt
+#
+# Not listed on purpose: the Glue jobs (ingestion/collisions_api, transformations/)
+# run only in AWS Glue, which provides PySpark and awsglue itself.
+
+# sources/vehicle_simulator - sends events to Kafka.
+# (2.0.2 and older break on Python 3.12+.)
+kafka-python>=2.0.3,<3
+
+# ingestion/telemetry_stream - Spark Structured Streaming (needs Java 17+).
+# Spark 4 matches the connector versions chosen in stream_telemetry_to_bronze.py.
+pyspark>=4.0,<5

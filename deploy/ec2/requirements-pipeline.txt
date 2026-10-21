@@ -1,6 +1,0 @@
-# Pinned for the EC2 pipeline image (simulator + Spark streaming).
-pyspark==4.0.1
-# kafka-python 2.0.2 breaks on Python 3.12+ (vendored six); 2.0.3+ fixes it.
-kafka-python>=2.0.3,<3
-python-dotenv==1.0.1
-requests==2.32.3

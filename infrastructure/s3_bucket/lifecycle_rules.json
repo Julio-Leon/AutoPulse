@@ -1,0 +1,28 @@
+{
+  "Rules": [
+    {
+      "ID": "delete-bronze-vehicle-telemetry-after-30-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "bronze/vehicle_telemetry/" },
+      "Expiration": { "Days": 30 }
+    },
+    {
+      "ID": "delete-silver-vehicle-telemetry-after-30-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "silver/vehicle_telemetry/" },
+      "Expiration": { "Days": 30 }
+    },
+    {
+      "ID": "delete-quarantine-vehicle-telemetry-after-30-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "quarantine/vehicle_telemetry/" },
+      "Expiration": { "Days": 30 }
+    },
+    {
+      "ID": "clean-up-unfinished-uploads-after-7-days",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+    }
+  ]
+}
