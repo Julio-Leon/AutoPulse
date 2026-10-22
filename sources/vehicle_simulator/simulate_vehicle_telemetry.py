@@ -6,12 +6,17 @@ Simulates a fleet of 10 vehicles driving around Midtown Manhattan. Every
 `vehicle.telemetry.raw`:
 
     {"event_id": "VEH-001-20261021T125501123456Z", "vehicle_id": "VEH-001",
+     "driver_name": "Maria Lopez", "make": "Ford", "model": "Transit", "model_year": 2022,
      "timestamp": "2026-10-21T12:55:01.123456+00:00",
      "latitude": 40.7581, "longitude": -73.9853, "speed_mph": 23.4,
      "odometer_miles": 45210.37, "fuel_level_pct": 61.2,
      "engine_status": "running", "is_simulated": true}
 
-The fleet's state (position, odometer, fuel) is saved to
+When the fleet is created, each vehicle is given a driver and a make, model
+and year (picked from the lists below). They stay with the vehicle for good and
+are sent in every event, so the pipeline always knows who drives what.
+
+The fleet's state (details, position, odometer, fuel) is saved to
 data/raw/fleet_state.json after every event, so a restart continues where it
 left off instead of creating new vehicles. A vehicle refuels to a full tank
 when it drops below 10%.
@@ -71,6 +76,20 @@ FUEL_TANK_GALLONS = 18.0
 AVERAGE_MPG = 25.0
 REFUEL_BELOW_PCT = 10.0
 
+# Fleet details, assigned once when the fleet is created.
+VEHICLE_MODELS = [            # (make, model): typical city fleet vehicles
+    ("Ford", "Transit"), ("Ford", "Explorer"), ("Toyota", "Camry"), ("Toyota", "Prius"),
+    ("Honda", "Accord"), ("Chevrolet", "Express"), ("Ram", "ProMaster"),
+    ("Mercedes-Benz", "Sprinter"), ("Nissan", "NV200"), ("Hyundai", "Sonata"),
+]
+MODEL_YEARS = range(2018, 2026)
+DRIVER_NAMES = [              # fictional drivers
+    "Maria Lopez", "James Carter", "Aisha Khan", "Daniel Kim", "Sofia Rossi",
+    "Marcus Johnson", "Elena Petrova", "Kevin O'Brien", "Priya Patel", "Luis Romero",
+    "Grace Chen", "Omar Haddad",
+]
+VEHICLE_DETAIL_FIELDS = ("driver_name", "make", "model", "model_year")
+
 # <project root>/data/raw/fleet_state.json  (data/ is git-ignored)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_FILE = PROJECT_ROOT / "data" / "raw" / "fleet_state.json"
@@ -87,12 +106,21 @@ def load_or_create_fleet():
     """Load the saved fleet, or create 10 new vehicles the first time."""
     if STATE_FILE.exists():
         fleet = json.loads(STATE_FILE.read_text())
-        logger.info("Loaded %d vehicles from %s", len(fleet), STATE_FILE)
-        return fleet
+        if all(field in vehicle for vehicle in fleet for field in VEHICLE_DETAIL_FIELDS):
+            logger.info("Loaded %d vehicles from %s", len(fleet), STATE_FILE)
+            return fleet
+        logger.info("Saved fleet has no driver/make/model/year (older version): creating a new fleet")
 
+    # Every vehicle gets its own driver; models may repeat, like in a real fleet.
+    drivers = random.sample(DRIVER_NAMES, NUMBER_OF_VEHICLES)
+    models = [random.choice(VEHICLE_MODELS) for _ in range(NUMBER_OF_VEHICLES)]
     fleet = [
         {
             "vehicle_id": f"VEH-{number:03d}",
+            "driver_name": drivers[number - 1],
+            "make": models[number - 1][0],
+            "model": models[number - 1][1],
+            "model_year": random.choice(MODEL_YEARS),
             "latitude": BASE_LATITUDE + random.uniform(-0.04, 0.04),
             "longitude": BASE_LONGITUDE + random.uniform(-0.04, 0.04),
             "speed_mph": random.uniform(0, 45),
@@ -157,6 +185,10 @@ def move_vehicle(vehicle):
     return {
         "event_id": f"{vehicle['vehicle_id']}-{now.strftime('%Y%m%dT%H%M%S%fZ')}",
         "vehicle_id": vehicle["vehicle_id"],
+        "driver_name": vehicle["driver_name"],
+        "make": vehicle["make"],
+        "model": vehicle["model"],
+        "model_year": vehicle["model_year"],
         "timestamp": now.isoformat(),
         "latitude": round(vehicle["latitude"], 6),
         "longitude": round(vehicle["longitude"], 6),

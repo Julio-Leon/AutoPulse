@@ -18,8 +18,9 @@ Output is organized by date, one new file per date per run:
 
 Per Bronze row:
   1. Parse the raw JSON into columns.
-  2. Validate: IDs present, timestamp parseable, coordinates/speed/odometer/
-     fuel in range, engine status one of running/idling/off.
+  2. Validate: IDs and vehicle details (driver, make, model, year) present,
+     timestamp parseable, coordinates/speed/odometer/fuel in range, engine
+     status one of running/idling/off.
   3. Valid rows -> Silver. Invalid rows -> quarantine, with a validation_error
      explaining why. Duplicate event_ids within a run -> quarantine too.
   Each row is classified once (one pass), then split into the two outputs.
@@ -51,7 +52,7 @@ from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from pyspark.sql import Window
 from pyspark.sql import functions as F
-from pyspark.sql.types import BooleanType, DoubleType, StringType, StructField, StructType
+from pyspark.sql.types import BooleanType, DoubleType, IntegerType, StringType, StructField, StructType
 
 # --------------------------------------------------
 # Job parameters
@@ -75,6 +76,10 @@ def read_job_parameters():
 EVENT_SCHEMA = StructType([
     StructField("event_id", StringType()),
     StructField("vehicle_id", StringType()),
+    StructField("driver_name", StringType()),
+    StructField("make", StringType()),
+    StructField("model", StringType()),
+    StructField("model_year", IntegerType()),
     StructField("timestamp", StringType()),
     StructField("latitude", DoubleType()),
     StructField("longitude", DoubleType()),
@@ -95,6 +100,8 @@ def validation_error():
     rules = [
         (F.col("event_id").isNull() | (F.col("event_id") == ""), "missing_event_id"),
         (F.col("vehicle_id").isNull() | (F.col("vehicle_id") == ""), "missing_vehicle_id"),
+        (F.col("driver_name").isNull() | F.col("make").isNull() | F.col("model").isNull()
+         | F.col("model_year").isNull(), "missing_vehicle_details"),
         (F.col("event_timestamp").isNull(), "invalid_timestamp"),
         (~F.col("latitude").between(-90, 90) | F.col("latitude").isNull(), "invalid_latitude"),
         (~F.col("longitude").between(-180, 180) | F.col("longitude").isNull(), "invalid_longitude"),
@@ -123,6 +130,10 @@ def classify(bronze):
             "raw_payload", "kafka_topic", "kafka_partition", "kafka_offset", "kafka_timestamp", "ingested_at",
             F.trim("event.event_id").alias("event_id"),
             F.upper(F.trim("event.vehicle_id")).alias("vehicle_id"),
+            F.trim("event.driver_name").alias("driver_name"),
+            F.trim("event.make").alias("make"),
+            F.trim("event.model").alias("model"),
+            "event.model_year",
             F.to_timestamp("event.timestamp").alias("event_timestamp"),
             "event.latitude", "event.longitude", "event.speed_mph",
             "event.odometer_miles", "event.fuel_level_pct",
