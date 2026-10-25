@@ -1,0 +1,7 @@
+# Packages for the Streamlit in Snowflake app (Snowflake's Anaconda channel).
+# Streamlit and snowflake-snowpark-python are always included; we add pydeck for the map.
+name: app_environment
+channels:
+  - snowflake
+dependencies:
+  - pydeck

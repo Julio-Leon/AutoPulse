@@ -20,6 +20,12 @@ User=ec2-user
 WorkingDirectory=/home/ec2-user/AutoPulse
 Environment=PYTHONUNBUFFERED=1
 Environment=AWS_REGION=us-east-1
+# Spark's working folder. Spark copies its libraries there at every start (~500 MB,
+# mostly the AWS SDK). The default is /tmp, which on Amazon Linux lives in memory
+# and is too small on a t3.micro, so use a folder on disk, emptied at each start.
+Environment=SPARK_LOCAL_DIRS=/var/tmp/autopulse-spark
+ExecStartPre=/usr/bin/rm -rf /var/tmp/autopulse-spark
+ExecStartPre=/usr/bin/mkdir -p /var/tmp/autopulse-spark
 ExecStart=/home/ec2-user/autopulse-venv/bin/python ingestion/telemetry_stream/stream_telemetry_to_bronze.py
 Restart=always
 RestartSec=30

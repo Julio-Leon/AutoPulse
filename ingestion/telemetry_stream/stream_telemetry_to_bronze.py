@@ -4,7 +4,7 @@ AutoPulse - stream vehicle telemetry from Kafka into S3 Bronze.
 Spark Structured Streaming reads every event the simulator sends to the Kafka
 topic `vehicle.telemetry.raw` and, every 5 minutes, appends them to Bronze as
 one Parquet file. (Every 5 minutes rather than every minute: 5x fewer small
-files to list and read later, and Silver is only built every 15 minutes anyway.)
+files to list, read and load later.)
 Bronze keeps the message exactly as received (raw JSON text) plus Kafka
 metadata; parsing and validation happen later in Silver.
 
@@ -31,6 +31,7 @@ Settings (environment variables, all optional):
     BRONZE_PATH               default s3://autopulse-julio-leon/bronze/vehicle_telemetry
     CHECKPOINT_PATH           default s3://autopulse-julio-leon/_checkpoints/vehicle_telemetry_bronze
     TRIGGER_INTERVAL          default "5 minutes"
+    SPARK_DRIVER_MEMORY       default 512m (small enough for a 1 GB t3.micro; the data is tiny)
     AWS_REGION                default us-east-1
 """
 
@@ -50,6 +51,7 @@ KAFKA_TOPIC = "vehicle.telemetry.raw"
 BRONZE_PATH = os.getenv("BRONZE_PATH", "s3://autopulse-julio-leon/bronze/vehicle_telemetry")
 CHECKPOINT_PATH = os.getenv("CHECKPOINT_PATH", "s3://autopulse-julio-leon/_checkpoints/vehicle_telemetry_bronze")
 TRIGGER_INTERVAL = os.getenv("TRIGGER_INTERVAL", "5 minutes")
+SPARK_DRIVER_MEMORY = os.getenv("SPARK_DRIVER_MEMORY", "512m")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 
@@ -88,7 +90,10 @@ def create_spark_session():
         .appName("AutoPulse-Stream-Telemetry-To-Bronze")
         .master("local[*]")
         .config("spark.jars.packages", ",".join(packages))
-        .config("spark.sql.shuffle.partitions", "4")
+        # Memory: 10 vehicles produce ~600 events per batch, so Spark needs very little.
+        .config("spark.driver.memory", SPARK_DRIVER_MEMORY)
+        .config("spark.ui.enabled", "false")          # no web UI: saves memory
+        .config("spark.sql.shuffle.partitions", "1")
         .config("spark.sql.session.timeZone", "UTC")
         # Standard Parquet timestamps (readable by Glue and Snowflake).
         .config("spark.sql.parquet.outputTimestampType", "TIMESTAMP_MICROS")

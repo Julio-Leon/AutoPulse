@@ -7,11 +7,12 @@
 | Vehicle telemetry, Bronze | `bronze/vehicle_telemetry/` | 30 days |
 | Vehicle telemetry, Silver | `silver/vehicle_telemetry/` | 30 days |
 | Vehicle telemetry, quarantine | `quarantine/vehicle_telemetry/` | 30 days |
+| Vehicle telemetry, Gold fact | `gold/fact_vehicle_telemetry/` | 30 days |
 | Unfinished uploads (whole bucket) | everything | 7 days |
 
-Only vehicle telemetry (which includes the vehicles' locations) expires.
-Collisions data, the streaming checkpoints (`_checkpoints/`) and the deployed
-code (`deployment/`) are kept.
+Only vehicle telemetry events (which include the vehicles' locations) expire.
+Kept: `gold/dim_vehicle/` (one row per vehicle), all collisions data, the
+streaming checkpoints (`_checkpoints/`) and the deployed code (`deployment/`).
 
 The age is counted from when each file was written. Telemetry files are written
 within minutes of their events, so "30 days old" means "events older than 30

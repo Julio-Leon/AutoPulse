@@ -1,9 +1,11 @@
-# AutoPulse - local Kafka
+# AutoPulse - Kafka (on your laptop, and on the EC2 streaming host)
 #
-#   docker compose -f infrastructure/local_kafka/docker-compose.yml up -d     start Kafka + Kafka UI
-#   docker compose -f infrastructure/local_kafka/docker-compose.yml down      stop (data is kept)
+#   docker compose -f infrastructure/local_kafka/docker-compose.yml up -d                 start Kafka
+#   docker compose -f infrastructure/local_kafka/docker-compose.yml --profile ui up -d    Kafka + Kafka UI
+#   docker compose -f infrastructure/local_kafka/docker-compose.yml down                  stop (data is kept)
 #
-# Kafka UI: http://localhost:8080
+# Kafka UI (http://localhost:8080) only starts with "--profile ui": it is handy on
+# a laptop but not needed on the EC2 host, where memory is tight (t3.micro, 1 GB).
 
 # Fixed project name, so containers and the data volume keep the same names
 # no matter which folder you run docker compose from.
@@ -39,6 +41,9 @@ services:
       # New topics (like vehicle.telemetry.raw) get 3 partitions.
       KAFKA_NUM_PARTITIONS: 3
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+
+      # Memory: Kafka reserves 1 GB by default; 256 MB is plenty for 10 vehicles.
+      KAFKA_HEAP_OPTS: "-Xms256m -Xmx256m"
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
@@ -51,6 +56,7 @@ services:
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: autopulse-kafka-ui
+    profiles: ["ui"]           # only started with --profile ui
     ports:
       - "8080:8080"
     environment:

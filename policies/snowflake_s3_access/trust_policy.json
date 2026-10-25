@@ -4,9 +4,9 @@
     {
       "Sid": "SnowflakeStorageIntegrationCanUseThisRole",
       "Effect": "Allow",
-      "Principal": { "AWS": "REPLACE_WITH_STORAGE_AWS_IAM_USER_ARN" },
+      "Principal": { "AWS": "arn:aws:iam::654655255299:user/b7nc2000-s" },
       "Action": "sts:AssumeRole",
-      "Condition": { "StringEquals": { "sts:ExternalId": "REPLACE_WITH_STORAGE_AWS_EXTERNAL_ID" } }
+      "Condition": { "StringEquals": { "sts:ExternalId": "VV75750_SFCRole=3_9YRZmEMYzFzVkiiSBIa9rgIemRI=" } }
     }
   ]
 }

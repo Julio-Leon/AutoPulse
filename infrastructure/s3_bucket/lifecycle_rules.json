@@ -3,26 +3,52 @@
     {
       "ID": "delete-bronze-vehicle-telemetry-after-30-days",
       "Status": "Enabled",
-      "Filter": { "Prefix": "bronze/vehicle_telemetry/" },
-      "Expiration": { "Days": 30 }
+      "Filter": {
+        "Prefix": "bronze/vehicle_telemetry/"
+      },
+      "Expiration": {
+        "Days": 30
+      }
     },
     {
       "ID": "delete-silver-vehicle-telemetry-after-30-days",
       "Status": "Enabled",
-      "Filter": { "Prefix": "silver/vehicle_telemetry/" },
-      "Expiration": { "Days": 30 }
+      "Filter": {
+        "Prefix": "silver/vehicle_telemetry/"
+      },
+      "Expiration": {
+        "Days": 30
+      }
     },
     {
       "ID": "delete-quarantine-vehicle-telemetry-after-30-days",
       "Status": "Enabled",
-      "Filter": { "Prefix": "quarantine/vehicle_telemetry/" },
-      "Expiration": { "Days": 30 }
+      "Filter": {
+        "Prefix": "quarantine/vehicle_telemetry/"
+      },
+      "Expiration": {
+        "Days": 30
+      }
+    },
+    {
+      "ID": "delete-gold-vehicle-telemetry-after-30-days",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": "gold/fact_vehicle_telemetry/"
+      },
+      "Expiration": {
+        "Days": 30
+      }
     },
     {
       "ID": "clean-up-unfinished-uploads-after-7-days",
       "Status": "Enabled",
-      "Filter": { "Prefix": "" },
-      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 7 }
+      "Filter": {
+        "Prefix": ""
+      },
+      "AbortIncompleteMultipartUpload": {
+        "DaysAfterInitiation": 7
+      }
     }
   ]
 }

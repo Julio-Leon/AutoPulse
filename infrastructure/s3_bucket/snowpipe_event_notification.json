@@ -1,0 +1,14 @@
+{
+  "QueueConfigurations": [
+    {
+      "Id": "gold-files-to-snowpipe",
+      "QueueArn": "arn:aws:sqs:us-east-1:654655255299:sf-snowpipe-AIDAZQ3D6OMB35VZO6XKS-wzyCBF5hoBerDZJY7ljj6g",
+      "Events": ["s3:ObjectCreated:*"],
+      "Filter": {
+        "Key": {
+          "FilterRules": [{ "Name": "prefix", "Value": "gold/" }]
+        }
+      }
+    }
+  ]
+}
