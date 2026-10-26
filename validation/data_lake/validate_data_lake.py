@@ -3,7 +3,8 @@ AutoPulse - data lake validation: did the pipeline move the data correctly?
 
 Checks the S3 layers against each other (Bronze -> Silver -> Gold) by reading
 only each Parquet file's footer: every Parquet file stores its own row count
-and column names, so no data is read and the checks take seconds.
+and column names at its end, so only the end of each file is downloaded (our
+files are small, usually the whole file) and the checks take seconds.
 
 Telemetry (one UTC day, default today):
   telemetry_bronze_fully_processed   Silver + quarantine rows = the Bronze files the
@@ -51,8 +52,8 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import boto3
+import pyarrow as pa
 import pyarrow.parquet as pq
-from pyarrow import fs
 
 # --------------------------------------------------
 # Settings
@@ -93,8 +94,11 @@ EXPECTED_COLUMNS = {
                            "south_latitude", "north_latitude", "west_longitude", "east_longitude"},
 }
 
+# Bytes downloaded from the end of each file: enough for the footer of any of our
+# files (and the whole file for most of them, which are well under 1 MB).
+FOOTER_FETCH_BYTES = 1024 * 1024
+
 s3 = boto3.client("s3", region_name=REGION)
-s3_files = fs.S3FileSystem(region=REGION)
 
 
 class ValidationFailed(Exception):
@@ -128,10 +132,34 @@ def list_parquet(prefix):
     return sorted(files, key=lambda f: f.modified)
 
 
+def read_footer(key):
+    """
+    A Parquet file's footer (row count, columns), downloading only the end of the file.
+
+    A Parquet file ends with: <footer> <footer length: 4 bytes> "PAR1".
+    boto3 downloads the last 1 MB (the whole file if it's smaller); pyarrow then
+    reads the footer from memory. (Done with boto3 because the pyarrow in AWS's
+    Lambda layer can't read from S3 by itself.)
+    """
+    response = s3.get_object(Bucket=BUCKET, Key=key, Range=f"bytes=-{FOOTER_FETCH_BYTES}")
+    tail = response["Body"].read()
+    file_size = int(response.get("ContentRange", "/0").split("/")[-1]) or len(tail)
+
+    if len(tail) >= file_size:                          # we have the whole file
+        return pq.read_metadata(pa.BufferReader(tail))
+
+    footer_length = int.from_bytes(tail[-8:-4], "little")
+    if footer_length + 8 > len(tail):                   # unusually large footer: fetch it all
+        tail = s3.get_object(Bucket=BUCKET, Key=key, Range=f"bytes=-{footer_length + 8}")["Body"].read()
+    # Footer + length + "PAR1", with "PAR1" in front: the smallest valid Parquet
+    # "file" holding just the footer.
+    return pq.read_metadata(pa.BufferReader(b"PAR1" + tail[-(footer_length + 8):]))
+
+
 def read_footers(files):
     """Fill in rows and columns from each file's footer, 32 files at a time."""
     def read(f):
-        metadata = pq.read_metadata(f"{BUCKET}/{f.key}", filesystem=s3_files)
+        metadata = read_footer(f.key)
         f.rows, f.columns = metadata.num_rows, frozenset(metadata.schema.names)
     with ThreadPoolExecutor(max_workers=32) as pool:
         list(pool.map(read, files))
