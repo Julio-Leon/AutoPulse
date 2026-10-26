@@ -44,18 +44,6 @@
         "arn:aws:s3:::autopulse-julio-leon/bronze/vehicle_telemetry/*",
         "arn:aws:s3:::autopulse-julio-leon/_checkpoints/*"
       ]
-    },
-    {
-      "Sid": "AirflowRunsGlueJobs",
-      "Effect": "Allow",
-      "Action": [
-        "glue:StartJobRun",
-        "glue:GetJobRun",
-        "glue:GetJobRuns",
-        "glue:GetJob",
-        "glue:BatchStopJobRun"
-      ],
-      "Resource": "arn:aws:glue:us-east-1:866934333672:job/autopulse-*"
     }
   ]
 }

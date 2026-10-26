@@ -1,0 +1,14 @@
+{
+  "Name": "autopulse-collisions-daily",
+  "ScheduleExpression": "cron(0 6 * * ? *)",
+  "ScheduleExpressionTimezone": "America/New_York",
+  "FlexibleTimeWindow": {
+    "Mode": "OFF"
+  },
+  "State": "ENABLED",
+  "Target": {
+    "Arn": "arn:aws:states:us-east-1:866934333672:stateMachine:autopulse-collisions-pipeline",
+    "RoleArn": "arn:aws:iam::866934333672:role/AutoPulseSchedulerRole",
+    "Input": "{}"
+  }
+}

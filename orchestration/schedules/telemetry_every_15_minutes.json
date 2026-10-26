@@ -1,0 +1,14 @@
+{
+  "Name": "autopulse-telemetry-every-15-minutes",
+  "ScheduleExpression": "cron(0/15 8-17 ? * MON-FRI *)",
+  "ScheduleExpressionTimezone": "America/New_York",
+  "FlexibleTimeWindow": {
+    "Mode": "OFF"
+  },
+  "State": "ENABLED",
+  "Target": {
+    "Arn": "arn:aws:states:us-east-1:866934333672:stateMachine:autopulse-telemetry-pipeline",
+    "RoleArn": "arn:aws:iam::866934333672:role/AutoPulseSchedulerRole",
+    "Input": "{}"
+  }
+}

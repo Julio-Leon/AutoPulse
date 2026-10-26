@@ -11,3 +11,9 @@ kafka-python>=2.0.3,<3
 # ingestion/telemetry_stream - Spark Structured Streaming (needs Java 17+).
 # Spark 4 matches the connector versions chosen in stream_telemetry_to_bronze.py.
 pyspark>=4.0,<5
+
+# validation/data_lake - checks the S3 layers by reading Parquet file footers.
+# (In AWS the same script runs as a Lambda, which gets both from the
+# AWS-managed layer AWSSDKPandas-Python312.)
+boto3>=1.34
+pyarrow>=15

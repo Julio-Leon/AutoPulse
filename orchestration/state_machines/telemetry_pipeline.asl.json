@@ -1,0 +1,74 @@
+{
+  "Comment": "AutoPulse telemetry pipeline (every 15 minutes, Mon-Fri 8:00-17:45 New York): Bronze -> Silver -> Gold, then validate the data lake. The EC2 stream fills Bronze; Snowpipe loads Gold into Snowflake by itself.",
+  "StartAt": "TelemetryBronzeToSilver",
+  "States": {
+    "TelemetryBronzeToSilver": {
+      "Type": "Task",
+      "Comment": "Run Glue job autopulse-telemetry-silver and wait until it finishes",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "autopulse-telemetry-silver"
+      },
+      "ResultSelector": {
+        "JobRunId.$": "$.Id",
+        "State.$": "$.JobRunState",
+        "ExecutionTimeSeconds.$": "$.ExecutionTime"
+      },
+      "ResultPath": "$.silver",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 1,
+          "BackoffRate": 1
+        }
+      ],
+      "Next": "TelemetrySilverToGold"
+    },
+    "TelemetrySilverToGold": {
+      "Type": "Task",
+      "Comment": "Run Glue job autopulse-telemetry-gold and wait until it finishes",
+      "Resource": "arn:aws:states:::glue:startJobRun.sync",
+      "Parameters": {
+        "JobName": "autopulse-telemetry-gold"
+      },
+      "ResultSelector": {
+        "JobRunId.$": "$.Id",
+        "State.$": "$.JobRunState",
+        "ExecutionTimeSeconds.$": "$.ExecutionTime"
+      },
+      "ResultPath": "$.gold",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "States.TaskFailed"
+          ],
+          "IntervalSeconds": 120,
+          "MaxAttempts": 1,
+          "BackoffRate": 1
+        }
+      ],
+      "Next": "ValidateDataLake"
+    },
+    "ValidateDataLake": {
+      "Type": "Task",
+      "Comment": "Check the S3 layers against each other (Lambda autopulse-validate-data-lake)",
+      "Resource": "arn:aws:states:::lambda:invoke",
+      "Parameters": {
+        "FunctionName": "autopulse-validate-data-lake",
+        "Payload": {
+          "pipeline": "telemetry",
+          "bronze_cutoff.$": "$$.Execution.StartTime"
+        }
+      },
+      "ResultSelector": {
+        "passed.$": "$.Payload.passed",
+        "results.$": "$.Payload.results"
+      },
+      "ResultPath": "$.validation",
+      "End": true
+    }
+  }
+}
