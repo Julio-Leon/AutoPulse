@@ -26,25 +26,19 @@ Dimensions: dim_date and dim_location have their expected row counts.
 Columns: the newest file of every table has the columns the next step expects.
 
 Each check ends PASS, WARN, FAIL or SKIP (nothing to check). Any FAIL makes
-the run fail: exit code 1 on a laptop, an error in Lambda (the Step Functions
-run turns red).
+the run fail: exit code 1 on a laptop; in Airflow the validate_data_lake task
+fails and the DAG run turns red.
 
 --- Run from your laptop (project root, normal AWS login) ---
     python validation/data_lake/validate_data_lake.py                 # both pipelines, today
     python validation/data_lake/validate_data_lake.py --pipeline telemetry --date 2026-10-26
 
---- Run in AWS: Lambda function autopulse-validate-data-lake ---
-  Runtime Python 3.12, handler lambda_function.lambda_handler (paste this file into
-  lambda_function.py), layer AWSSDKPandas-Python312 (provides pyarrow),
-  memory 512 MB, timeout 5 min, role AutoPulseDataLakeValidationRole.
-  Step Functions calls it as the last step of each pipeline with
-      {"pipeline": "telemetry" | "collisions", "bronze_cutoff": "<run start time>"}
-  bronze_cutoff = when the Step Functions run started: every Bronze file written
-  before it must have been processed by that run.
+--- Run in Airflow (last task of each pipeline DAG, see orchestration/airflow_dags/) ---
+  autopulse_common.validate_data_lake() calls run(pipeline, cutoff=<DAG run start>):
+  every Bronze file written before the run started must have been processed by it.
 """
 
 import argparse
-import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -52,6 +46,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import boto3
+from botocore.config import Config
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -66,6 +61,7 @@ NEW_YORK = ZoneInfo("America/New_York")
 MAX_QUARANTINE_RATE = 0.01                    # 1% of telemetry rows rejected
 MAX_SILVER_DROP_RATE = 0.01                   # 1% of collision rows dropped by Silver
 MAX_BRONZE_TELEMETRY_AGE = timedelta(minutes=15)
+MAX_UNPROCESSED_AGE = timedelta(minutes=30)   # Bronze waiting longer than this: Silver isn't running
 FLEET_SIZE = 10
 DIM_DATE_FIRST, DIM_DATE_LAST = date(2012, 7, 1), date(2030, 12, 31)
 DIM_LOCATION_CELLS = 96 * 100
@@ -98,11 +94,8 @@ EXPECTED_COLUMNS = {
 # files (and the whole file for most of them, which are well under 1 MB).
 FOOTER_FETCH_BYTES = 1024 * 1024
 
-s3 = boto3.client("s3", region_name=REGION)
-
-
-class ValidationFailed(Exception):
-    """Raised (in Lambda) when at least one check fails."""
+# 32 connections: one per reading thread (boto3 keeps only 10 by default).
+s3 = boto3.client("s3", region_name=REGION, config=Config(max_pool_connections=32))
 
 
 # --------------------------------------------------
@@ -138,8 +131,8 @@ def read_footer(key):
 
     A Parquet file ends with: <footer> <footer length: 4 bytes> "PAR1".
     boto3 downloads the last 1 MB (the whole file if it's smaller); pyarrow then
-    reads the footer from memory. (Done with boto3 because the pyarrow in AWS's
-    Lambda layer can't read from S3 by itself.)
+    reads the footer from memory. (Done with boto3 so it works with any pyarrow
+    build, including ones without S3 support.)
     """
     response = s3.get_object(Bucket=BUCKET, Key=key, Range=f"bytes=-{FOOTER_FETCH_BYTES}")
     tail = response["Body"].read()
@@ -241,10 +234,16 @@ def validate_telemetry(day, cutoff, now):
                f"only {files_processed} of the {must_be_processed} Bronze files written before this run "
                f"reached Silver")
     else:
-        waiting = len(bronze) - files_processed
-        record("telemetry_bronze_fully_processed", "PASS",
-               f"{processed} rows from {files_processed} Bronze files are in Silver/quarantine"
-               + (f"; {waiting} newer file(s) wait for the next run" if waiting else ""))
+        waiting = bronze[files_processed:]
+        stale = [f for f in waiting if now - f.modified > MAX_UNPROCESSED_AGE]
+        summary = (f"{processed} rows from {files_processed} Bronze files are in Silver/quarantine"
+                   + (f"; {len(waiting)} newer file(s) wait for the next run" if waiting else ""))
+        if stale:
+            record("telemetry_bronze_fully_processed", "WARN",
+                   summary + f" ({len(stale)} waiting over {MAX_UNPROCESSED_AGE.seconds // 60} min: "
+                             f"is the telemetry pipeline running?)")
+        else:
+            record("telemetry_bronze_fully_processed", "PASS", summary)
 
     # Quarantine rate.
     if processed:
@@ -359,17 +358,6 @@ def run(pipeline, day=None, cutoff=None):
     failures = [r for r in results if r["status"] == "FAIL"]
     return {"pipeline": pipeline, "checked_at": now.isoformat(), "passed": not failures,
             "failures": failures, "results": list(results)}
-
-
-def lambda_handler(event, context):
-    """Called by Step Functions: {"pipeline": ..., "bronze_cutoff": "<ISO time>"}."""
-    cutoff = event.get("bronze_cutoff")
-    report = run(event.get("pipeline", "all"),
-                 cutoff=datetime.fromisoformat(cutoff) if cutoff else None)
-    print(json.dumps(report, indent=2))
-    if not report["passed"]:
-        raise ValidationFailed(json.dumps(report["failures"]))
-    return report
 
 
 def main():

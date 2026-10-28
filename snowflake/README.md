@@ -12,7 +12,7 @@ S3 gold/<table>/  --Snowpipe-->  LANDING.<table>  --dynamic table-->  CORE.<tabl
 |---|---|---|
 | `LANDING` | Raw copies of the Gold files, plus `SOURCE_FILE` / `LOADED_AT` | 5 Snowpipes (one per Gold table) |
 | `CORE` | `DIM_DATE`, `DIM_LOCATION`, `DIM_VEHICLE`, `FACT_COLLISION`, `FACT_VEHICLE_TELEMETRY`: newest version of each row | Dynamic tables (refresh on their own) |
-| `ANALYTICS` | `VW_COLLISION_HOTSPOTS`, `VW_FLEET_CURRENT_POSITION`, `VW_VEHICLE_RECENT_PATH`, `VW_VEHICLE_DAILY_SUMMARY`, `VW_VEHICLE_HOTSPOT_EXPOSURE` | Views (always current) |
+| `ANALYTICS` | `VW_COLLISION_HOTSPOTS`, `VW_FLEET_CURRENT_POSITION`, `VW_VEHICLE_RECENT_PATH`, `VW_VEHICLE_RECENT_STOPS`, `VW_VEHICLE_DAILY_SUMMARY`, `VW_VEHICLE_HOTSPOT_EXPOSURE` | Views (always current) |
 
 A nightly task (`LANDING.DELETE_OLD_TELEMETRY`) deletes telemetry older than
 30 days, matching the S3 lifecycle rules.
@@ -50,6 +50,13 @@ Run each `.sql` file in a Snowsight worksheet (paste it, then **Run All**).
 9. **`07_core_dynamic_tables.sql`**: the star schema.
 10. **`08_retention_task.sql`**: the nightly 30-day cleanup.
 11. **`09_analytics_views.sql`**: the dashboard views.
+12. **`10_airflow_monitoring_user.sql`** (as ACCOUNTADMIN, after the Airflow host is
+    set up): the read-only role `AUTOPULSE_MONITOR` and the service user
+    `AUTOPULSE_AIRFLOW` that Airflow's health checks use. Paste the public key
+    printed by `setup_airflow_host.sh` into it first.
+13. **`11_vehicle_recent_stops_view.sql`**: the view `VW_VEHICLE_RECENT_STOPS`
+    (each vehicle's last 10 stops) for the dashboard's "Recent stops" tab and
+    the numbered stop markers on the map.
 
 ## Checking that it works
 

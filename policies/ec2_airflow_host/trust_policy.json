@@ -2,10 +2,10 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "EventBridgeSchedulerCanUseThisRole",
+      "Sid": "Ec2CanUseThisRole",
       "Effect": "Allow",
       "Principal": {
-        "Service": "scheduler.amazonaws.com"
+        "Service": "ec2.amazonaws.com"
       },
       "Action": "sts:AssumeRole"
     }

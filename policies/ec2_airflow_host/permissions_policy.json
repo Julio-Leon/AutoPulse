@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "RunAndWatchAutoPulseGlueJobs",
+      "Effect": "Allow",
+      "Action": [
+        "glue:StartJobRun",
+        "glue:GetJobRun",
+        "glue:GetJobRuns",
+        "glue:GetJob",
+        "glue:BatchStopJobRun"
+      ],
+      "Resource": "arn:aws:glue:us-east-1:866934333672:job/autopulse-*"
+    },
+    {
+      "Sid": "ListTheDataLake",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket",
+        "s3:GetBucketLocation"
+      ],
+      "Resource": "arn:aws:s3:::autopulse-julio-leon"
+    },
+    {
+      "Sid": "ReadCodeAndValidateLayers",
+      "Effect": "Allow",
+      "Action": "s3:GetObject",
+      "Resource": [
+        "arn:aws:s3:::autopulse-julio-leon/deployment/*",
+        "arn:aws:s3:::autopulse-julio-leon/bronze/*",
+        "arn:aws:s3:::autopulse-julio-leon/silver/*",
+        "arn:aws:s3:::autopulse-julio-leon/quarantine/*",
+        "arn:aws:s3:::autopulse-julio-leon/gold/*"
+      ]
+    }
+  ]
+}

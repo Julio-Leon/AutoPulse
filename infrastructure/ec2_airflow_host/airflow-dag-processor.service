@@ -1,0 +1,23 @@
+# AutoPulse - Airflow DAG processor: reads the DAG files in
+# orchestration/airflow_dags/ (every minute) and saves what it finds in Airflow's
+# database. In Airflow 3 this is its own program; the scheduler no longer reads
+# DAG files. Starts at boot, restarts on its own. Installed by setup_airflow_host.sh.
+#   systemctl status airflow-dag-processor
+#   sudo journalctl -u airflow-dag-processor -f
+
+[Unit]
+Description=AutoPulse Airflow DAG processor
+Requires=postgresql.service
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+EnvironmentFile=/etc/autopulse/airflow.env
+WorkingDirectory=/home/ec2-user/airflow
+ExecStart=/home/ec2-user/airflow-venv/bin/airflow dag-processor
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

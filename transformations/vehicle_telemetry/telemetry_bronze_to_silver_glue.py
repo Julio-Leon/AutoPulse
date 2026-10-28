@@ -84,6 +84,7 @@ EVENT_SCHEMA = StructType([
     StructField("latitude", DoubleType()),
     StructField("longitude", DoubleType()),
     StructField("speed_mph", DoubleType()),
+    StructField("speed_limit_mph", IntegerType()),      # limit of the road the vehicle is on (null when parked)
     StructField("odometer_miles", DoubleType()),
     StructField("fuel_level_pct", DoubleType()),
     StructField("engine_status", StringType()),
@@ -135,7 +136,7 @@ def classify(bronze):
             F.trim("event.model").alias("model"),
             "event.model_year",
             F.to_timestamp("event.timestamp").alias("event_timestamp"),
-            "event.latitude", "event.longitude", "event.speed_mph",
+            "event.latitude", "event.longitude", "event.speed_mph", "event.speed_limit_mph",
             "event.odometer_miles", "event.fuel_level_pct",
             F.lower(F.trim("event.engine_status")).alias("engine_status"),
             "event.is_simulated",

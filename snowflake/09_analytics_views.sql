@@ -6,7 +6,7 @@
 --
 --   VW_COLLISION_HOTSPOTS        map layer 1: grid cells ranked by crash severity
 --   VW_FLEET_CURRENT_POSITION    map layer 2: where each vehicle is right now
---   VW_VEHICLE_RECENT_PATH       map layer 3: each vehicle's last 2 hours of driving
+--   VW_VEHICLE_RECENT_PATH       map layer 3: each vehicle's recent route (file 11)
 --   VW_VEHICLE_DAILY_SUMMARY     per vehicle per day: miles, speeding, hotspot time
 --   VW_VEHICLE_HOTSPOT_EXPOSURE  per vehicle per hotspot: how often it drives there
 --
@@ -102,24 +102,9 @@ FROM latest_event e
 LEFT JOIN AUTOPULSE.CORE.DIM_VEHICLE v ON v.VEHICLE_ID = e.VEHICLE_ID
 LEFT JOIN VW_COLLISION_HOTSPOTS h ON h.CELL_ID = e.CELL_ID;
 
--- ---------------------------------------------------------------------
--- Fleet: each vehicle's recent path (for drawing its route on the map)
--- ---------------------------------------------------------------------
--- The 2 hours of driving up to each vehicle's latest event (so after 5 PM
--- the map still shows the day's last route), oldest point first.
-CREATE OR REPLACE VIEW VW_VEHICLE_RECENT_PATH
-    COMMENT = 'Each vehicle''s last 2 hours of positions, in order'
-AS
-WITH with_latest AS (
-    SELECT t.*, MAX(t.EVENT_TIMESTAMP) OVER (PARTITION BY t.VEHICLE_ID) AS VEHICLE_LAST_EVENT
-    FROM AUTOPULSE.CORE.FACT_VEHICLE_TELEMETRY t
-)
-SELECT
-    VEHICLE_ID,
-    ROW_NUMBER() OVER (PARTITION BY VEHICLE_ID ORDER BY EVENT_TIMESTAMP) AS POINT_ORDER,
-    EVENT_TIMESTAMP_LOCAL, LATITUDE, LONGITUDE, SPEED_MPH, IS_SPEEDING, CELL_ID
-FROM with_latest
-WHERE EVENT_TIMESTAMP >= DATEADD(hour, -2, VEHICLE_LAST_EVENT);
+-- (VW_VEHICLE_RECENT_PATH, each vehicle's recent route, is created in
+--  11_vehicle_recent_stops_view.sql: the route reaches back to the vehicle's
+--  10th-last stop, so it needs the stops view first.)
 
 -- ---------------------------------------------------------------------
 -- Vehicles: daily summary

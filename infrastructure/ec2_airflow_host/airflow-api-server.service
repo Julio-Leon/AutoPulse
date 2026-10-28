@@ -1,0 +1,26 @@
+# AutoPulse - Airflow API server, port 8080. In Airflow 3 it replaces the old
+# "webserver" and does two jobs:
+#   - serves the Airflow web page (and its REST API) to your browser;
+#   - serves the "execution API" that running tasks use to report their state
+#     back to Airflow (tasks no longer talk to the database directly).
+# So tasks can only run while this service is up. Starts at boot, restarts on its own.
+# Installed by setup_airflow_host.sh into /etc/systemd/system/.
+#   systemctl status airflow-api-server
+#   sudo journalctl -u airflow-api-server -f
+
+[Unit]
+Description=AutoPulse Airflow API server (web page + task execution API)
+Requires=postgresql.service
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+EnvironmentFile=/etc/autopulse/airflow.env
+WorkingDirectory=/home/ec2-user/airflow
+ExecStart=/home/ec2-user/airflow-venv/bin/airflow api-server --port 8080
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

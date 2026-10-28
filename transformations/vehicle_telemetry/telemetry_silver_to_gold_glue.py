@@ -10,8 +10,8 @@ Builds two Gold tables from the new Silver telemetry:
       event_timestamp_local  New York time
       event_hour_local       0-23, New York time
       cell_id                ~500 m grid cell -> dim_location (null outside NYC)
-      latitude, longitude, speed_mph, odometer_miles, fuel_level_pct, engine_status
-      is_speeding            speed above New York City's 25 mph default limit
+      latitude, longitude, speed_mph, speed_limit_mph, odometer_miles, fuel_level_pct, engine_status
+      is_speeding            speed above the road's limit (NYC's 25 mph default when unknown)
 
       gold/fact_vehicle_telemetry/event_date_local=2026-10-22/<new file per run>
 
@@ -78,7 +78,7 @@ def read_job_parameters():
 
 
 LOCAL_TIMEZONE = "America/New_York"
-SPEED_LIMIT_MPH = 25            # New York City's default speed limit
+DEFAULT_SPEED_LIMIT_MPH = 25    # New York City's default limit, when an event has none
 VEHICLE_DETAILS = ["driver_name", "make", "model", "model_year"]
 
 
@@ -87,7 +87,10 @@ VEHICLE_DETAILS = ["driver_name", "make", "model", "model_year"]
 # --------------------------------------------------
 
 def build_fact_vehicle_telemetry(silver):
+    if "speed_limit_mph" not in silver.columns:          # events from before the simulator sent it
+        silver = silver.withColumn("speed_limit_mph", F.lit(None).cast("int"))
     local_time = F.from_utc_timestamp("event_timestamp", LOCAL_TIMEZONE)
+    speed_limit = F.coalesce(F.col("speed_limit_mph"), F.lit(DEFAULT_SPEED_LIMIT_MPH))
     return silver.select(
         "event_id",
         "vehicle_id",
@@ -96,8 +99,8 @@ def build_fact_vehicle_telemetry(silver):
         local_time.alias("event_timestamp_local"),
         F.hour(local_time).alias("event_hour_local"),
         nyc_grid.cell_id_for("latitude", "longitude").alias("cell_id"),
-        "latitude", "longitude", "speed_mph",
-        (F.col("speed_mph") > SPEED_LIMIT_MPH).alias("is_speeding"),
+        "latitude", "longitude", "speed_mph", "speed_limit_mph",
+        (F.col("speed_mph") > speed_limit).alias("is_speeding"),
         "odometer_miles", "fuel_level_pct", "engine_status",
         F.date_format(local_time, "yyyy-MM-dd").alias("event_date_local"),   # Gold folder (not stored in the file)
     )

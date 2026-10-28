@@ -1,0 +1,23 @@
+# AutoPulse - Airflow scheduler: decides which DAG runs are due, queues their tasks
+# and runs them (LocalExecutor: each task is a process on this host).
+# Starts at boot, restarts on its own. Installed by setup_airflow_host.sh into
+# /etc/systemd/system/.
+#   systemctl status airflow-scheduler
+#   sudo journalctl -u airflow-scheduler -f
+
+[Unit]
+Description=AutoPulse Airflow scheduler
+Requires=postgresql.service
+After=postgresql.service network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+EnvironmentFile=/etc/autopulse/airflow.env
+WorkingDirectory=/home/ec2-user/airflow
+ExecStart=/home/ec2-user/airflow-venv/bin/airflow scheduler
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

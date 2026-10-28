@@ -4,14 +4,19 @@ AutoPulse - fleet management dashboard (Streamlit in Snowflake).
 One page, built on the views in AUTOPULSE.ANALYTICS:
 
   Top        KPIs: vehicles online, in a hotspot now, speeding now, fleet miles today
-  Map        collision hotspots (red squares, darker = more severe), every vehicle's
-             position (green = online, red = online and inside a hotspot, grey =
-             offline) and its last 2 hours of driving (lines)
+  Map        collision hotspots (red squares, darker = more severe) and, in each
+             driver's own color: the vehicle's position (faded when offline), its
+             route (line) and its stops: the last 5 or all of today's
+             (numbered markers, 1 = most recent)
   Tabs       Fleet      every vehicle: driver, vehicle, status, speed, fuel
+             Stops      every vehicle's stops (last 5, or today's)
              Hotspots   the most dangerous ~500 m cells and their main crash causes
              Vehicle    one vehicle in detail: daily miles, speeding, time in hotspots
 
-The data refreshes every 2 minutes (or with the "Refresh now" button). Until the
+Refreshing: every minute the page checks (with one tiny query) whether new
+telemetry has reached Snowflake, and reloads itself as soon as it has. It also
+reloads every 15 minutes regardless, so "online/offline" stays correct when no
+new data arrives (evenings, weekends). "Refresh now" reloads immediately. Until the
 Gold jobs have produced data, each section says what is missing instead of failing.
 
 Runs inside Snowflake (Snowsight -> Projects -> Streamlit, or a Workspace).
@@ -32,12 +37,30 @@ from snowflake.snowpark.context import get_active_session
 # --------------------------------------------------
 
 VIEWS = "AUTOPULSE.ANALYTICS"
-REFRESH_SECONDS = 120                     # how long query results are reused
+RELOAD_EVERY_MINUTES = 15                 # reload the page at least this often
+CHECK_FOR_NEW_DATA_EVERY = "60s"          # how often to look for new telemetry
+NEW_YORK = "America/New_York"
 NYC_CENTER = (40.73, -73.95)              # map center when there are no vehicles yet
 
-GREEN = [0, 160, 80]                      # online
-RED = [220, 30, 30]                       # online and inside a hotspot
-GREY = [140, 140, 140]                    # offline (not seen for 30+ minutes)
+# One color per vehicle (dot, route and stops), in VEHICLE_ID order. No reds,
+# oranges or yellows: those are the hotspot squares' colors.
+DRIVER_COLORS = [
+    [31, 119, 180],     # blue
+    [44, 160, 44],      # green
+    [148, 103, 189],    # purple
+    [140, 86, 75],      # brown
+    [227, 119, 194],    # pink
+    [23, 190, 207],     # cyan
+    [0, 0, 128],        # navy
+    [128, 128, 0],      # olive
+    [112, 128, 144],    # slate grey
+    [0, 0, 0],          # black
+]
+OFFLINE_OPACITY = 90                      # 0-255: offline vehicles are drawn faded
+LAST_STOPS = 5                            # "Last 5 stops" option
+LAST_STOPS_OPTION = f"Last {LAST_STOPS}"
+TODAY_OPTION = "Today's"
+MIN_ROUTE_HOURS = 2                       # a route always shows at least this much driving
 
 st.set_page_config(page_title="AutoPulse Fleet", layout="wide")
 
@@ -61,7 +84,7 @@ session = snowflake_session()
 # Data
 # --------------------------------------------------
 
-@st.cache_data(ttl=REFRESH_SECONDS, show_spinner=False)
+@st.cache_data(ttl=RELOAD_EVERY_MINUTES * 60, show_spinner=False)
 def run_query(sql):
     """Run a query and return a pandas DataFrame, with Snowflake decimals turned into floats."""
     df = session.sql(sql).to_pandas()
@@ -81,13 +104,104 @@ def load_data():
                            f"ORDER BY ACTIVITY_DATE DESC, VEHICLE_ID"),
         "exposure": run_query(f"SELECT * FROM {VIEWS}.VW_VEHICLE_HOTSPOT_EXPOSURE "
                               f"ORDER BY VEHICLE_ID, MINUTES_IN_CELL DESC"),
+        "stops": recent_stops(),
     }
 
 
-def vehicle_color(row):
-    if not row["IS_ONLINE"]:
-        return GREY
-    return RED if row["IN_HOTSPOT"] else GREEN
+def recent_stops():
+    """
+    Each vehicle's stops on its latest driving day (snowflake/11_vehicle_recent_stops_view.sql).
+    If that view hasn't been created yet, the rest of the page still works.
+    """
+    try:
+        return run_query(f"SELECT * FROM {VIEWS}.VW_VEHICLE_RECENT_STOPS ORDER BY VEHICLE_ID, STOPS_AGO")
+    except Exception:
+        return pd.DataFrame()
+
+
+def latest_telemetry():
+    """
+    Newest event in the telemetry table the dashboard reads. It changes only when
+    the pipeline delivers new data, so it tells the page when to reload.
+    (MAX of a column is usually answered from Snowflake's table metadata, so this
+    check costs next to nothing.)
+    """
+    row = session.sql("SELECT MAX(EVENT_TIMESTAMP) FROM AUTOPULSE.CORE.FACT_VEHICLE_TELEMETRY").collect()
+    return str(row[0][0]) if row else "none"
+
+
+def reload_page():
+    """Forget the cached query results and draw the whole page again."""
+    st.cache_data.clear()
+    st.session_state.pop("loaded_at", None)
+    st.rerun()
+
+
+@st.fragment(run_every=CHECK_FOR_NEW_DATA_EVERY)
+def auto_refresh():
+    """
+    Runs on its own every minute (a fragment re-runs only itself, not the page).
+    Reloads the page when new telemetry has arrived, or when the data on screen is
+    RELOAD_EVERY_MINUTES old.
+    """
+    now = pd.Timestamp.now(tz=NEW_YORK)
+    newest = latest_telemetry()
+    # First run of this browser tab: remember what is on screen.
+    st.session_state.setdefault("loaded_at", now)
+    st.session_state.setdefault("loaded_telemetry", newest)
+
+    too_old = now - st.session_state["loaded_at"] >= pd.Timedelta(minutes=RELOAD_EVERY_MINUTES)
+    if newest != st.session_state["loaded_telemetry"] or too_old:
+        st.session_state["loaded_telemetry"] = newest
+        st.cache_data.clear()
+        st.session_state["loaded_at"] = now
+        st.rerun(scope="app")
+
+    st.caption(f"Updated {st.session_state['loaded_at']:%H:%M}. The page reloads by itself when "
+               f"new telemetry arrives, and at least every {RELOAD_EVERY_MINUTES} minutes. "
+               "Vehicles drive Mon-Fri, 8:00-17:00 New York time.")
+
+
+def driver_colors(*tables):
+    """{vehicle_id: [r, g, b]}: each vehicle gets its own color, always the same one."""
+    ids = sorted(set().union(*(set(t["VEHICLE_ID"]) for t in tables if not t.empty)))
+    return {vehicle_id: DRIVER_COLORS[i % len(DRIVER_COLORS)] for i, vehicle_id in enumerate(ids)}
+
+
+def css(rgb):
+    return f"rgb({rgb[0]}, {rgb[1]}, {rgb[2]})"
+
+
+def map_legend(fleet, colors):
+    """HTML for the legend in the sidebar, using the same colors as the map."""
+    dot = ("display:inline-block; width:14px; height:14px; border-radius:50%; "
+           "border:2px solid white; margin-right:8px; vertical-align:middle; background:")
+    line = "display:inline-block; width:22px; height:4px; margin-right:8px; vertical-align:middle; background:"
+    row = "margin:6px 0; font-size:0.95rem;"
+    stop = ("display:inline-block; width:16px; height:16px; line-height:12px; border-radius:50%; "
+            "background:white; border:2px solid #888; color:#888; "
+            "font-size:10px; font-weight:700; text-align:center; margin-right:8px; vertical-align:middle;")
+    drivers = "".join(
+        f'<div style="{row}"><span style="{dot}{css(colors.get(v.VEHICLE_ID, [128, 128, 128]))}"></span>'
+        f'{v.VEHICLE_ID} - {or_default(v.DRIVER_NAME)}</div>'
+        for v in fleet.itertuples()
+    ) if not fleet.empty else f'<div style="{row}">No vehicles yet</div>'
+
+    # Hotspot squares go from pale yellow (less severe) to dark red (most severe),
+    # as they look over the light map (see hotspot_layer).
+    scale = "linear-gradient(to right, rgb(255,242,194), rgb(255,176,125), rgb(255,56,56))"
+    return f"""
+<div style="{row}"><b>Drivers</b> (dot, route and stops in the same color)</div>
+{drivers}
+<div style="{row}"><span style="{dot}#888; opacity:0.35;"></span>Faded dot = offline (not seen for 30+ min)</div>
+<div style="{row}"><span style="{line}#888;"></span>Route covering the stops shown</div>
+<div style="{row}"><span style="{stop}">1</span>Stop, numbered (1 = most recent)</div>
+<div style="{row} margin-top:14px;"><b>Collision hotspots</b> (~500 m squares)</div>
+<div style="height:14px; border-radius:3px; border:1px solid rgb(150,0,0); background:{scale};"></div>
+<div style="display:flex; justify-content:space-between; font-size:0.85rem; opacity:0.8;">
+  <span>less severe</span><span>most severe</span>
+</div>
+"""
 
 
 def or_default(value, default=""):
@@ -133,14 +247,15 @@ def hotspot_layer(hotspots):
     )
 
 
-def path_layer(paths, fleet):
+def path_layer(paths, fleet, colors):
     routes = (paths.groupby("VEHICLE_ID")
                    .apply(lambda p: p[["LONGITUDE", "LATITUDE"]].values.tolist())
                    .reset_index(name="path"))
-    routes = routes.merge(fleet[["VEHICLE_ID", "DRIVER_NAME", "color"]], on="VEHICLE_ID", how="left")
-    routes["color"] = routes["color"].apply(lambda c: c if isinstance(c, list) else GREY)
+    routes = routes.merge(fleet[["VEHICLE_ID", "DRIVER_NAME"]], on="VEHICLE_ID", how="left")
+    routes["color"] = routes["VEHICLE_ID"].map(colors)
     routes["tooltip"] = routes.apply(
-        lambda r: f"<b>{r['VEHICLE_ID']}</b> - last 2 hours of driving<br/>{or_default(r['DRIVER_NAME'])}", axis=1)
+        lambda r: f"<b>{r['VEHICLE_ID']}</b> - route<br/>"
+                  f"{or_default(r['DRIVER_NAME'])}", axis=1)
     return pdk.Layer(
         "PathLayer",
         data=routes[["path", "color", "tooltip"]],
@@ -151,8 +266,48 @@ def path_layer(paths, fleet):
     )
 
 
-def vehicle_layers(fleet):
+def stop_layers(stops, colors):
+    """White markers with a ring and number in the driver's color (1 = most recent stop)."""
+    markers = stops.copy()
+    markers["color"] = markers["VEHICLE_ID"].map(colors)
+    markers["number"] = markers["STOPS_AGO"].astype(int).astype(str)
+    markers["tooltip"] = markers.apply(lambda s: (
+        f"<b>{s['VEHICLE_ID']}</b> - {or_default(s['DRIVER_NAME'])}<br/>"
+        f"Stop {int(s['STOPS_AGO'])} (1 = most recent)<br/>"
+        f"Arrived {as_text(s['ARRIVED_LOCAL'], '%a %H:%M')}, "
+        + ("still parked" if s["IS_PARKED_NOW"] else
+           f"left {as_text(s['DEPARTED_LOCAL'], '%H:%M')} ({s['MINUTES_PARKED']:.0f} min)")
+        + (f"<br/>In hotspot #{int(s['HOTSPOT_RANK'])}" if pd.notna(s["HOTSPOT_RANK"]) else "")
+    ), axis=1)
+    data = markers[["LONGITUDE", "LATITUDE", "number", "color", "tooltip"]]
+    rings = pdk.Layer(
+        "ScatterplotLayer",
+        data=data,
+        get_position=["LONGITUDE", "LATITUDE"],
+        get_fill_color=[255, 255, 255],
+        get_line_color="color",
+        line_width_min_pixels=2,
+        stroked=True,
+        get_radius=40,
+        radius_min_pixels=7,
+        pickable=True,
+    )
+    numbers = pdk.Layer(
+        "TextLayer",
+        data=data,
+        get_position=["LONGITUDE", "LATITUDE"],
+        get_text="number",
+        get_size=11,
+        get_color="color",
+        get_alignment_baseline="'center'",
+    )
+    return [rings, numbers]
+
+
+def vehicle_layers(fleet, colors):
     vehicles = fleet.copy()
+    vehicles["color"] = vehicles.apply(
+        lambda v: colors[v["VEHICLE_ID"]] + ([255] if v["IS_ONLINE"] else [OFFLINE_OPACITY]), axis=1)
     vehicles["tooltip"] = vehicles.apply(lambda v: (
         f"<b>{v['VEHICLE_ID']}</b> - {or_default(v['DRIVER_NAME'], 'driver unknown')}<br/>"
         f"{or_default(v['MAKE'])} {or_default(v['MODEL'])} "
@@ -187,14 +342,47 @@ def vehicle_layers(fleet):
     return [dots, labels]
 
 
-def fleet_map(fleet, hotspots, paths, hotspots_on_map, show_hotspots, show_paths):
+def stops_to_show(stops, which):
+    """The stops picked in the sidebar: each vehicle's last 5, or all of today's."""
+    if stops.empty:
+        return stops
+    if which == TODAY_OPTION:
+        today = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
+        return stops[pd.to_datetime(stops["ARRIVED_LOCAL"]).dt.normalize() == today]
+    return stops[stops["STOPS_AGO"] <= LAST_STOPS]
+
+
+def route_to_show(paths, shown_stops, which):
+    """
+    Cut each vehicle's route (its whole latest driving day) down to the part that
+    covers the stops shown, so every stop marker sits on its route:
+      Last 5   from the 5th-last stop (or 2 hours back, if that is longer)
+      Today's  from midnight (or 2 hours back, if the vehicle hasn't driven today)
+    """
+    if paths.empty:
+        return paths
+    times = pd.to_datetime(paths["EVENT_TIMESTAMP_LOCAL"])
+    start = times.groupby(paths["VEHICLE_ID"]).transform("max") - pd.Timedelta(hours=MIN_ROUTE_HOURS)
+    if which == TODAY_OPTION:
+        midnight = pd.Timestamp.now(tz=NEW_YORK).tz_localize(None).normalize()
+        start = start.where(start < midnight, midnight)
+    elif not shown_stops.empty:
+        first_stop = pd.to_datetime(shown_stops.groupby("VEHICLE_ID")["ARRIVED_LOCAL"].min())
+        first_stop = paths["VEHICLE_ID"].map(first_stop)
+        start = start.where(first_stop.isna() | (start < first_stop), first_stop)
+    return paths[times >= start]
+
+
+def fleet_map(fleet, hotspots, paths, stops, colors, hotspots_on_map, show_hotspots, show_paths, show_stops):
     layers = []
     if show_hotspots and not hotspots.empty:
         layers.append(hotspot_layer(hotspots[hotspots["HOTSPOT_RANK"] <= hotspots_on_map]))
     if show_paths and not paths.empty:
-        layers.append(path_layer(paths, fleet))
+        layers.append(path_layer(paths, fleet, colors))
+    if show_stops and not stops.empty:
+        layers.extend(stop_layers(stops, colors))          # under the vehicles, above the routes
     if not fleet.empty:
-        layers.extend(vehicle_layers(fleet))
+        layers.extend(vehicle_layers(fleet, colors))
 
     if fleet.empty:
         latitude, longitude, zoom = NYC_CENTER[0], NYC_CENTER[1], 10
@@ -221,21 +409,35 @@ with st.sidebar:
     show_hotspots = st.checkbox("Collision hotspots", value=True)
     hotspots_on_map = st.slider("Hotspot cells to show", 10, 500, 100, step=10,
                                 help="The most severe ~500 m cells over the last 12 months of collisions.")
-    show_paths = st.checkbox("Routes (last 2 hours)", value=True)
+    show_paths = st.checkbox("Routes", value=True,
+                             help="Each vehicle's driving that covers the stops shown (at least the last 2 hours).")
+    show_stops = st.checkbox("Stops", value=True)
+    which_stops = st.radio("Which stops", [LAST_STOPS_OPTION, TODAY_OPTION], horizontal=True,
+                           help=f"Each vehicle's last {LAST_STOPS} stops, or every stop it made today. "
+                                "Also used by the Recent stops tab.")
     st.divider()
     if st.button("Refresh now"):
-        st.cache_data.clear()
-        (getattr(st, "rerun", None) or st.experimental_rerun)()
-    st.caption(f"Data is refreshed every {REFRESH_SECONDS // 60} minutes. "
-               "Vehicles drive Mon-Fri, 8:00-17:00 New York time.")
+        reload_page()
 
 with st.spinner("Loading data from Snowflake..."):
     data = load_data()
 
-fleet, hotspots, paths, daily, exposure = (
-    data["fleet"], data["hotspots"], data["paths"], data["daily"], data["exposure"])
+fleet, hotspots, paths, daily, exposure, stops = (
+    data["fleet"], data["hotspots"], data["paths"], data["daily"], data["exposure"], data["stops"])
+colors = driver_colors(fleet, paths, stops)
+stops = stops_to_show(stops, which_stops)          # map markers and the Recent stops tab
+paths = route_to_show(paths, stops, which_stops)   # so each route covers its stops
 if not fleet.empty:
-    fleet["color"] = fleet.apply(vehicle_color, axis=1)
+    # "Hotspot" = one of the cells selected with the slider, so the KPI and the
+    # Fleet table always match the squares drawn on the map.
+    # (The view's own IN_HOTSPOT flag is fixed to the top 100 cells.)
+    fleet["IN_HOTSPOT"] = fleet["HOTSPOT_RANK"].notna() & (fleet["HOTSPOT_RANK"] <= hotspots_on_map)
+
+with st.sidebar:
+    auto_refresh()
+    st.divider()
+    st.header("Legend")
+    st.markdown(map_legend(fleet, colors), unsafe_allow_html=True)
 
 # KPIs -----------------------------------------------------------------------
 latest_day = daily["ACTIVITY_DATE"].max() if not daily.empty else None
@@ -254,13 +456,13 @@ if fleet.empty and hotspots.empty:
     st.info("No data yet: the map fills in once the Gold jobs have run and Snowpipe has "
             "loaded their files (vehicles from autopulse-telemetry-gold, hotspots from "
             "autopulse-collisions-gold).")
-st.pydeck_chart(fleet_map(fleet, hotspots, paths, hotspots_on_map, show_hotspots, show_paths),
+st.pydeck_chart(fleet_map(fleet, hotspots, paths, stops, colors, hotspots_on_map,
+                          show_hotspots, show_paths, show_stops),
                 width="stretch")
-st.caption("Squares: collision hotspots (darker = more severe). Dots: vehicles - "
-           "green online, red online inside a hotspot, grey offline. Lines: last 2 hours of driving.")
 
 # Tabs -----------------------------------------------------------------------
-fleet_tab, hotspots_tab, vehicle_tab = st.tabs(["Fleet", "Hotspots", "Vehicle details"])
+fleet_tab, stops_tab, hotspots_tab, vehicle_tab = st.tabs(
+    ["Fleet", "Recent stops", "Hotspots", "Vehicle details"])
 
 with fleet_tab:
     if fleet.empty:
@@ -280,11 +482,40 @@ with fleet_tab:
         })
         st.dataframe(table, hide_index=True, width="stretch")
 
+with stops_tab:
+    if stops.empty:
+        st.info("No stops to show. A stop is recorded when a vehicle parks with its engine off "
+                "(2-8 minutes at each destination). With \"Today's\" picked, there are none "
+                "before the fleet starts driving (Mon-Fri 8:00). If this stays empty, run "
+                "snowflake/11_vehicle_recent_stops_view.sql in Snowflake.")
+    else:
+        choices = ["All vehicles"] + sorted(stops["VEHICLE_ID"].unique().tolist())
+        chosen = st.selectbox("Show", choices, key="stops_vehicle")
+        shown = stops if chosen == "All vehicles" else stops[stops["VEHICLE_ID"] == chosen]
+        st.dataframe(pd.DataFrame({
+            "Vehicle": shown["VEHICLE_ID"],
+            "Driver": shown["DRIVER_NAME"],
+            "Stop": shown["STOPS_AGO"].astype(int),
+            "Arrived": shown["ARRIVED_LOCAL"].apply(as_text),
+            "Left": shown.apply(lambda r: "Still parked" if r["IS_PARKED_NOW"]
+                                else as_text(r["DEPARTED_LOCAL"], "%H:%M"), axis=1),
+            "Minutes parked": shown["MINUTES_PARKED"].round(0),
+            "Hotspot": shown["HOTSPOT_RANK"].apply(lambda r: f"#{int(r)}" if pd.notna(r) else ""),
+            "Latitude": shown["LATITUDE"].round(5),
+            "Longitude": shown["LONGITUDE"].round(5),
+        }), hide_index=True, width="stretch")
+        shown_what = (f"Each vehicle's last {LAST_STOPS} stops (fewer if it has made fewer)"
+                      if which_stops == LAST_STOPS_OPTION else "Every stop made today")
+        st.caption(f"{shown_what}; change this with \"Which stops\" in the sidebar. "
+                   "Stop 1 = the most recent, also the numbers on the map. A stop = parked with "
+                   "the engine off; red lights don't count. Hotspot = the collision rank of the "
+                   "~500 m cell it parked in.")
+
 with hotspots_tab:
     if hotspots.empty:
         st.info("No collision data yet (autopulse-collisions-gold has not produced data).")
     else:
-        top = hotspots[hotspots["IS_HOTSPOT"]]
+        top = hotspots[hotspots["HOTSPOT_RANK"] <= hotspots_on_map]
         left, right = st.columns([3, 2])
         with left:
             st.subheader("Most dangerous cells (last 12 months)")
@@ -305,7 +536,8 @@ with hotspots_tab:
             causes = top["TOP_CONTRIBUTING_FACTOR"].fillna("Unspecified").value_counts().head(10)
             st.bar_chart(causes)
             st.caption("Severity score = collisions + 3 x people injured + 10 x people killed. "
-                       "Hotspots = the 100 highest-scoring cells.")
+                       f"Hotspots = the {hotspots_on_map} highest-scoring cells "
+                       "(the 'Hotspot cells to show' slider).")
 
 with vehicle_tab:
     if fleet.empty:
