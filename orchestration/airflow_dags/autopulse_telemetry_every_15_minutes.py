@@ -37,7 +37,7 @@ def new_bronze_files_arrived(**context):
 with DAG(
     dag_id="autopulse_telemetry_every_15_minutes",
     description="Vehicle telemetry: Bronze -> Silver -> Gold, then validate",
-    schedule="*/15 8-17 * * 1-5",          # runs at 8:00, 8:15 ... 17:45, Mon-Fri (New York time)
+    schedule="*/10 8-17 * * 1-5",          # runs at 8:00, 8:15 ... 17:45, Mon-Fri (New York time)
     start_date=START_DATE,
     catchup=False,
     max_active_runs=1,                     # never two runs at once

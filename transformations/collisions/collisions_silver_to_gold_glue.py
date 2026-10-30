@@ -141,6 +141,10 @@ def main():
     fact = build_fact_collision(silver).cache()
 
     changed_dates = sorted(r.crash_date_part for r in fact.select("crash_date_part").distinct().collect())
+    if not changed_dates:
+        print("New Silver files, but no rows to load into fact_collision: nothing to write.")
+        job.commit()
+        return
     print(f"Crash dates to refresh: {len(changed_dates)} ({changed_dates[0]} .. {changed_dates[-1]})")
 
     # Replace those dates only: empty each date's folder (retentionPeriod 0 = every file)...

@@ -405,6 +405,7 @@ def fleet_map(fleet, hotspots, paths, stops, colors, hotspots_on_map, show_hotsp
 st.title("AutoPulse - Fleet & Collision Hotspots")
 
 with st.sidebar:
+    drivers_box = st.container()      # the driver picker; filled in once the fleet is loaded
     st.header("Map")
     show_hotspots = st.checkbox("Collision hotspots", value=True)
     hotspots_on_map = st.slider("Hotspot cells to show", 10, 500, 100, step=10,
@@ -433,11 +434,33 @@ if not fleet.empty:
     # (The view's own IN_HOTSPOT flag is fixed to the top 100 cells.)
     fleet["IN_HOTSPOT"] = fleet["HOTSPOT_RANK"].notna() & (fleet["HOTSPOT_RANK"] <= hotspots_on_map)
 
+# Driver picker (top of the sidebar): empty = everyone. Filters the map, the
+# Fleet table and the Recent stops tab; the KPIs stay fleet-wide.
+with drivers_box:
+    names = dict(zip(fleet["VEHICLE_ID"], fleet["DRIVER_NAME"])) if not fleet.empty else {}
+    picked = st.multiselect(
+        "Drivers", sorted(names), key="picked_drivers",
+        format_func=lambda v: f"{v} - {or_default(names.get(v))}",
+        placeholder="All drivers",
+        help="Pick one or more drivers to see only their vehicle, route and stops. "
+             "Leave empty to see everyone.")
+    st.divider()
+
+
+def only_picked(table):
+    """The rows of the picked drivers (all rows when nobody is picked)."""
+    if not picked or table.empty:
+        return table
+    return table[table["VEHICLE_ID"].isin(picked)]
+
+
+shown_fleet, shown_paths, shown_stops = only_picked(fleet), only_picked(paths), only_picked(stops)
+
 with st.sidebar:
     auto_refresh()
     st.divider()
     st.header("Legend")
-    st.markdown(map_legend(fleet, colors), unsafe_allow_html=True)
+    st.markdown(map_legend(shown_fleet, colors), unsafe_allow_html=True)
 
 # KPIs -----------------------------------------------------------------------
 latest_day = daily["ACTIVITY_DATE"].max() if not daily.empty else None
@@ -456,7 +479,7 @@ if fleet.empty and hotspots.empty:
     st.info("No data yet: the map fills in once the Gold jobs have run and Snowpipe has "
             "loaded their files (vehicles from autopulse-telemetry-gold, hotspots from "
             "autopulse-collisions-gold).")
-st.pydeck_chart(fleet_map(fleet, hotspots, paths, stops, colors, hotspots_on_map,
+st.pydeck_chart(fleet_map(shown_fleet, hotspots, shown_paths, shown_stops, colors, hotspots_on_map,
                           show_hotspots, show_paths, show_stops),
                 width="stretch")
 
@@ -465,33 +488,31 @@ fleet_tab, stops_tab, hotspots_tab, vehicle_tab = st.tabs(
     ["Fleet", "Recent stops", "Hotspots", "Vehicle details"])
 
 with fleet_tab:
-    if fleet.empty:
+    if shown_fleet.empty:
         st.info("No vehicle data yet (autopulse-telemetry-gold has not produced data).")
     else:
         table = pd.DataFrame({
-            "Vehicle": fleet["VEHICLE_ID"],
-            "Driver": fleet["DRIVER_NAME"],
-            "Make / model": fleet["MAKE"] + " " + fleet["MODEL"] + " " + fleet["MODEL_YEAR"].astype("Int64").astype(str),
-            "Status": fleet["IS_ONLINE"].map({True: "Online", False: "Offline"}),
-            "Last seen": fleet["LAST_SEEN_LOCAL"].apply(as_text),
-            "Speed (mph)": fleet["SPEED_MPH"].round(0),
-            "Speeding": fleet["IS_SPEEDING"],
-            "Fuel %": fleet["FUEL_LEVEL_PCT"].round(0),
-            "Odometer (mi)": fleet["ODOMETER_MILES"].round(0),
-            "In hotspot": fleet["IN_HOTSPOT"],
+            "Vehicle": shown_fleet["VEHICLE_ID"],
+            "Driver": shown_fleet["DRIVER_NAME"],
+            "Make / model": shown_fleet["MAKE"] + " " + shown_fleet["MODEL"] + " " + shown_fleet["MODEL_YEAR"].astype("Int64").astype(str),
+            "Status": shown_fleet["IS_ONLINE"].map({True: "Online", False: "Offline"}),
+            "Last seen": shown_fleet["LAST_SEEN_LOCAL"].apply(as_text),
+            "Speed (mph)": shown_fleet["SPEED_MPH"].round(0),
+            "Speeding": shown_fleet["IS_SPEEDING"],
+            "Fuel %": shown_fleet["FUEL_LEVEL_PCT"].round(0),
+            "Odometer (mi)": shown_fleet["ODOMETER_MILES"].round(0),
+            "In hotspot": shown_fleet["IN_HOTSPOT"],
         })
         st.dataframe(table, hide_index=True, width="stretch")
 
 with stops_tab:
-    if stops.empty:
+    if shown_stops.empty:
         st.info("No stops to show. A stop is recorded when a vehicle parks with its engine off "
                 "(2-8 minutes at each destination). With \"Today's\" picked, there are none "
                 "before the fleet starts driving (Mon-Fri 8:00). If this stays empty, run "
                 "snowflake/11_vehicle_recent_stops_view.sql in Snowflake.")
     else:
-        choices = ["All vehicles"] + sorted(stops["VEHICLE_ID"].unique().tolist())
-        chosen = st.selectbox("Show", choices, key="stops_vehicle")
-        shown = stops if chosen == "All vehicles" else stops[stops["VEHICLE_ID"] == chosen]
+        shown = shown_stops
         st.dataframe(pd.DataFrame({
             "Vehicle": shown["VEHICLE_ID"],
             "Driver": shown["DRIVER_NAME"],
@@ -506,7 +527,8 @@ with stops_tab:
         }), hide_index=True, width="stretch")
         shown_what = (f"Each vehicle's last {LAST_STOPS} stops (fewer if it has made fewer)"
                       if which_stops == LAST_STOPS_OPTION else "Every stop made today")
-        st.caption(f"{shown_what}; change this with \"Which stops\" in the sidebar. "
+        st.caption(f"{shown_what}; change this with \"Which stops\" in the sidebar; "
+                   "pick drivers at the top of the sidebar. "
                    "Stop 1 = the most recent, also the numbers on the map. A stop = parked with "
                    "the engine off; red lights don't count. Hotspot = the collision rank of the "
                    "~500 m cell it parked in.")

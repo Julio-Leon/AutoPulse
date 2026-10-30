@@ -18,7 +18,7 @@ from autopulse_common import DEFAULT_ARGS, START_DATE, glue_job, validate_data_l
 with DAG(
     dag_id="autopulse_collisions_daily",
     description="NYC collisions: API -> Bronze -> Silver -> Gold, then validate",
-    schedule="0 6 * * *",                  # runs at 06:00 every day (New York time)
+    schedule="0 6 * * 1-5",                  # runs at 06:00 every day (New York time)
     start_date=START_DATE,
     catchup=False,                         # don't run the days missed before it was switched on
     max_active_runs=1,

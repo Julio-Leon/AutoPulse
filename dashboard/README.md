@@ -7,9 +7,9 @@ in `AUTOPULSE.ANALYTICS` (see `snowflake/09_analytics_views.sql`).
 | Section | Shows | View(s) |
 |---|---|---|
 | KPIs | vehicles online, in a hotspot now, speeding now, fleet miles on the latest day | `VW_FLEET_CURRENT_POSITION`, `VW_VEHICLE_DAILY_SUMMARY` |
-| Map | hotspot cells (red squares); per driver, in that driver's own color: vehicle (dot, faded when offline), route since its 10th-last stop (line), last 10 stops (numbered markers, 1 = most recent); hover for details | `VW_COLLISION_HOTSPOTS`, `VW_FLEET_CURRENT_POSITION`, `VW_VEHICLE_RECENT_PATH`, `VW_VEHICLE_RECENT_STOPS` |
+| Map | hotspot cells (red squares); per driver, in that driver's own color: vehicle (dot, faded when offline), route (line), stops (numbered markers, 1 = most recent): the last 5 or all of today's, picked in the sidebar; hover for details | `VW_COLLISION_HOTSPOTS`, `VW_FLEET_CURRENT_POSITION`, `VW_VEHICLE_RECENT_PATH`, `VW_VEHICLE_RECENT_STOPS` |
 | Fleet tab | every vehicle: driver, make/model/year, status, speed, fuel, in hotspot | `VW_FLEET_CURRENT_POSITION` |
-| Recent stops tab | each vehicle's last 10 stops (parked, engine off): arrived, left, minutes, hotspot | `VW_VEHICLE_RECENT_STOPS` (`snowflake/11_vehicle_recent_stops_view.sql`) |
+| Recent stops tab | each vehicle's last 5 or today's stops (parked, engine off): arrived, left, minutes, hotspot | `VW_VEHICLE_RECENT_STOPS` (`snowflake/11_vehicle_recent_stops_view.sql`) |
 | Hotspots tab | the most severe cells (as many as the sidebar slider shows) and their main crash causes | `VW_COLLISION_HOTSPOTS` |
 | Vehicle details tab | one vehicle: daily miles, % speeding, % time in hotspots, hotspots it drives through | `VW_VEHICLE_DAILY_SUMMARY`, `VW_VEHICLE_HOTSPOT_EXPOSURE` |
 

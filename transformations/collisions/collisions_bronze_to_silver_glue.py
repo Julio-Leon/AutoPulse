@@ -180,6 +180,13 @@ def main():
 
     # The crash dates this run touches (a small list: one entry per date).
     changed_dates = sorted(row.crash_date_part for row in silver.select("crash_date_part").distinct().collect())
+    if not changed_dates:
+        # New Bronze files, but not one row has a collision_id and a crash_date
+        # (e.g. the API sent back an error or an empty record): nothing to write.
+        # Save the bookmark so these unusable files aren't read again.
+        print(f"{bronze.count()} new Bronze rows, none with a collision_id and crash_date: nothing to write.")
+        job.commit()
+        return
     print(f"Crash dates to refresh: {len(changed_dates)} ({changed_dates[0]} .. {changed_dates[-1]})")
 
     # Replace those dates only: empty each date's folder (retentionPeriod 0 = delete
